@@ -20,7 +20,7 @@ export default defineConfig({
         short_name: 'Gallinero',
         description:
           'Lleva el registro sencillo de tu granja avícola: huevos, gallinas, ventas y más.',
-        theme_color: '#16a34a',
+        theme_color: '#fffbeb',
         background_color: '#ffffff',
         display: 'standalone',
         orientation: 'portrait',
