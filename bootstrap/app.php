@@ -17,8 +17,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         // Confiar en los proxies del hosting (SSL terminator, load balancer, etc.)
         // para que Laravel detecte HTTPS y genere URLs seguras (evita Mixed Content).
-        $middleware->trustProxies(at: '*',
-            headers: \Illuminate\Http\Request::HEADER_X_FORWARDED_ALL);
+        $middleware->trustProxies(at: '*');
 
         // Alias reutilizables en rutas.
         $middleware->alias([
