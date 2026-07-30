@@ -5,6 +5,7 @@ use App\Http\Middleware\EnsureActiveFarm;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Middleware\TrustProxies;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -14,6 +15,11 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        // Confiar en los proxies del hosting (SSL terminator, load balancer, etc.)
+        // para que Laravel detecte HTTPS y genere URLs seguras (evita Mixed Content).
+        $middleware->trustProxies(at: '*',
+            headers: \Illuminate\Http\Request::HEADER_X_FORWARDED_ALL);
+
         // Alias reutilizables en rutas.
         $middleware->alias([
             'active.farm' => EnsureActiveFarm::class,
