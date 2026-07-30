@@ -2,24 +2,23 @@
 
 namespace Database\Seeders;
 
-use App\Models\User;
-use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
 
+/**
+ * Seeder vacío para producción.
+ *
+ * Los usuarios reales se crean desde la app con /api/auth/register
+ * (cada usuario crea su propia granja al registrarse).
+ * No sembramos datos de prueba en producción.
+ */
 class DatabaseSeeder extends Seeder
 {
-    use WithoutModelEvents;
-
     /**
      * Seed the application's database.
      */
     public function run(): void
     {
-        // User::factory(10)->create();
-
-        User::factory()->create([
-            'name' => 'Test User',
-            'email' => 'test@example.com',
-        ]);
+        // Intencionalmente vacío en producción.
+        // Los usuarios se registran desde la app (endpoint /api/auth/register).
     }
 }
