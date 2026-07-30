@@ -20,8 +20,13 @@ const auth = useAuthStore()
 const farm = useFarmStore()
 const sync = useSyncStore()
 auth.restore()
-void farm.init().then(() => {
-  sync.setupListeners()
-  sync.refreshPending()
+// Validar el token contra el backend: si sigue válido, el usuario entra
+// directo sin volver a loguear. Si expiró, se limpia y el router manda a
+// /welcome. Si no hay red, se mantiene la sesión local (offline-first).
+void auth.validateSession().finally(() => {
+  void farm.init().then(() => {
+    sync.setupListeners()
+    sync.refreshPending()
+  })
 })
 app.mount('#app')

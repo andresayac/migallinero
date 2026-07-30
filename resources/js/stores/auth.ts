@@ -131,6 +131,47 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  /**
+   * Valida el token guardado contra el backend (/auth/me).
+   * - Si responde 200 → la sesión sigue válida, refresca datos del usuario.
+   * - Si responde 401 → el token expiró o se revocó: limpia y devuelve false.
+   * - Si no hay red → mantiene la sesión local (offline-first) para que
+   *   pueda seguir trabajando y sincronizar después.
+   *
+   * Devuelve true si el usuario puede entrar sin volver a loguear.
+   */
+  async function validateSession(): Promise<boolean> {
+    if (!hasBackendSession.value || !token.value) return !!user.value
+    try {
+      const data = await api.me()
+      // Refrescar datos del usuario por si cambiaron en el backend.
+      const u = data.user as { id: number; name: string; username: string; role: Role }
+      if (u) {
+        user.value = {
+          id: String(u.id),
+          name: u.name,
+          username: u.username,
+          role: u.role ?? 'admin',
+        }
+        persist()
+      }
+      return true
+    } catch (e) {
+      const err = e as { response?: { status?: number }; message?: string }
+      // 401 = token inválido/expirado → cerrar sesión silenciosamente.
+      if (err.response?.status === 401) {
+        user.value = null
+        token.value = ''
+        hasBackendSession.value = false
+        api.clearToken()
+        localStorage.removeItem('mg_auth')
+        return false
+      }
+      // Error de red (sin conexión) → mantener sesión local para offline.
+      return !!user.value
+    }
+  }
+
   return {
     user,
     token,
@@ -143,6 +184,7 @@ export const useAuthStore = defineStore('auth', () => {
     login,
     logout,
     restore,
+    validateSession,
   }
 })
 
