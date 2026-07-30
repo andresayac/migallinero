@@ -41,8 +41,8 @@ async function start() {
     // y luego hacemos el merge para enlazar UUIDs locales con los ids remotos.
     await farm.bootstrapFarm(ownerName.value.trim(), farmName.value.trim())
     await farm.mergeCatalogsFromBackend()
-    toast.success('¡Listo! Tu granja quedó creada')
-    router.replace({ name: 'home' })
+    toast.success('¡Granja creada! Vamos a configurarla')
+    router.replace({ name: 'setup' })
   } catch (e) {
     const err = e as Error
     // Si el backend no responde (sin conexión rural), caemos a modo offline local.
@@ -50,7 +50,7 @@ async function start() {
       auth.loginLocal(ownerName.value.trim(), 'admin')
       await farm.bootstrapFarm(ownerName.value.trim(), farmName.value.trim())
       toast.info('Sin conexión: granja creada en este dispositivo (se sincronizará después)')
-      router.replace({ name: 'home' })
+      router.replace({ name: 'setup' })
     } else {
       toast.error(err.message)
     }

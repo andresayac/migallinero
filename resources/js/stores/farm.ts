@@ -65,8 +65,27 @@ export const useFarmStore = defineStore('farm', () => {
   /**
    * Crea una granja nueva para el usuario con los catálogos por defecto de Colombia.
    * Se llama al "registrarse". El usuario queda como admin.
+   *
+   * Si se pasa `catalogs`, se usan esos catálogos en vez de los por defecto
+   * (para el asistente guiado donde el usuario personaliza antes de crear).
    */
-  async function bootstrapFarm(ownerName: string, farmName: string) {
+  async function bootstrapFarm(
+    ownerName: string,
+    farmName: string,
+    catalogs?: {
+      eggCategories?: Array<{ name: string; short: string; sellable: boolean; isBroken: boolean; color: string }>
+      pens?: Array<{ name: string; color: string }>
+      causes?: Array<{ name: string }>
+      presentations?: Array<{ code: string; name: string; unitsPerPack: number }>
+    },
+    config?: {
+      periodLockDays?: number
+      currency?: string
+      country?: string
+      timezone?: string
+      locale?: string
+    },
+  ) {
     const auth = useAuthStore()
     const fid = uuid()
     const ts = nowISO()
@@ -79,39 +98,48 @@ export const useFarmStore = defineStore('farm', () => {
       entryMode: 'auto' as const,
     }
 
-    // Categorías iniciales de huevo (configurables después desde Ajustes).
-    const eggCats: EggCategory[] = [
-      { ...base, localUuid: uuid(), name: 'Jumbo', short: 'JUM', sellable: true, isBroken: false, color: '#16a34a', sort: 1, active: true },
-      { ...base, localUuid: uuid(), name: 'EX', short: 'EX', sellable: true, isBroken: false, color: '#0ea5e9', sort: 2, active: true },
-      { ...base, localUuid: uuid(), name: 'AA', short: 'AA', sellable: true, isBroken: false, color: '#8b5cf6', sort: 3, active: true },
-      { ...base, localUuid: uuid(), name: 'A', short: 'A', sellable: true, isBroken: false, color: '#f59e0b', sort: 4, active: true },
-      { ...base, localUuid: uuid(), name: 'B', short: 'B', sellable: true, isBroken: false, color: '#ec4899', sort: 5, active: true },
-      { ...base, localUuid: uuid(), name: 'C', short: 'C', sellable: true, isBroken: false, color: '#64748b', sort: 6, active: true },
-      { ...base, localUuid: uuid(), name: 'Rotos', short: 'ROT', sellable: false, isBroken: true, color: '#dc2626', sort: 7, active: true },
-    ]
+    // Categorías de huevo: personalizadas del asistente o por defecto.
+    const eggCats: EggCategory[] = (catalogs?.eggCategories ?? [
+      { name: 'Jumbo', short: 'JUM', sellable: true, isBroken: false, color: '#16a34a' },
+      { name: 'EX', short: 'EX', sellable: true, isBroken: false, color: '#0ea5e9' },
+      { name: 'AA', short: 'AA', sellable: true, isBroken: false, color: '#8b5cf6' },
+      { name: 'A', short: 'A', sellable: true, isBroken: false, color: '#f59e0b' },
+      { name: 'B', short: 'B', sellable: true, isBroken: false, color: '#ec4899' },
+      { name: 'C', short: 'C', sellable: true, isBroken: false, color: '#64748b' },
+      { name: 'Rotos', short: 'ROT', sellable: false, isBroken: true, color: '#dc2626' },
+    ]).map((c, i) => ({
+      ...base, localUuid: uuid(), sort: i + 1, active: true, ...c,
+    }))
 
-    // Un galpón por defecto que el admin puede luego editar/agregar.
-    const defaultPens: Pen[] = [
-      { ...base, localUuid: uuid(), name: 'Galpón 1', active: true, sort: 1, color: '#16a34a' },
-    ]
+    // Galpones: personalizados o uno por defecto.
+    const defaultPens: Pen[] = (catalogs?.pens ?? [
+      { name: 'Galpón 1', color: '#16a34a' },
+    ]).map((p, i) => ({
+      ...base, localUuid: uuid(), sort: i + 1, active: true, ...p,
+    }))
 
-    // Causas de mortalidad típicas (configurables).
-    const defaultCauses: MortalityCause[] = [
-      { ...base, localUuid: uuid(), name: 'Enfermedad', active: true, sort: 1 },
-      { ...base, localUuid: uuid(), name: 'Accidente', active: true, sort: 2 },
-      { ...base, localUuid: uuid(), name: 'Ataque de animal', active: true, sort: 3 },
-      { ...base, localUuid: uuid(), name: 'Calor', active: true, sort: 4 },
-      { ...base, localUuid: uuid(), name: 'Frío', active: true, sort: 5 },
-      { ...base, localUuid: uuid(), name: 'Causa desconocida', active: true, sort: 6 },
-      { ...base, localUuid: uuid(), name: 'Otra causa', active: true, sort: 7 },
-    ]
+    // Causas de mortalidad: personalizadas o por defecto.
+    const defaultCauses: MortalityCause[] = (catalogs?.causes ?? [
+      { name: 'Enfermedad' },
+      { name: 'Accidente' },
+      { name: 'Ataque de animal' },
+      { name: 'Calor' },
+      { name: 'Frío' },
+      { name: 'Causa desconocida' },
+      { name: 'Otra causa' },
+    ]).map((c, i) => ({
+      ...base, localUuid: uuid(), sort: i + 1, active: true, ...c,
+    }))
 
-    // Presentaciones de venta (configurables): unidad, cubeta, torre.
-    const defaultPres: Presentation[] = [
-      { ...base, localUuid: uuid(), code: 'unit', name: 'Unidad', unitsPerPack: 1, sort: 1, active: true },
-      { ...base, localUuid: uuid(), code: 'cubeta', name: 'Cubeta (30)', unitsPerPack: 30, sort: 2, active: true },
-      { ...base, localUuid: uuid(), code: 'torre', name: 'Torre (300)', unitsPerPack: 300, sort: 3, active: true },
-    ]
+    // Presentaciones: personalizadas o por defecto.
+    const defaultPres: Presentation[] = (catalogs?.presentations ?? [
+      { code: 'unit' as const, name: 'Unidad', unitsPerPack: 1 },
+      { code: 'cubeta' as const, name: 'Cubeta (30)', unitsPerPack: 30 },
+      { code: 'torre' as const, name: 'Torre (300)', unitsPerPack: 300 },
+    ]).map((p, i) => ({
+      ...base, localUuid: uuid(), sort: i + 1, active: true,
+      code: p.code as Presentation['code'], name: p.name, unitsPerPack: p.unitsPerPack,
+    }))
 
     await db.transaction('rw', [db.eggCategories, db.pens, db.mortalityCauses, db.presentations], async () => {
       await db.eggCategories.bulkAdd(eggCats)
@@ -120,13 +148,23 @@ export const useFarmStore = defineStore('farm', () => {
       await db.presentations.bulkAdd(defaultPres)
     })
 
-    setActive(fid, farmName, 7)
+    const lockDays = config?.periodLockDays ?? 7
+    setActive(fid, farmName, lockDays)
     await loadCatalogs()
 
     // Persistimos la granja activa (MVP: una sola).
     localStorage.setItem(
       'mg_farm',
-      JSON.stringify({ id: fid, name: farmName, ownerName, periodLockDays: 7 }),
+      JSON.stringify({
+        id: fid,
+        name: farmName,
+        ownerName,
+        periodLockDays: lockDays,
+        currency: config?.currency ?? 'COP',
+        country: config?.country ?? 'CO',
+        timezone: config?.timezone ?? 'America/Bogota',
+        locale: config?.locale ?? 'es-CO',
+      }),
     )
     return fid
   }
@@ -248,11 +286,11 @@ export const useFarmStore = defineStore('farm', () => {
       return
     }
 
-    // Sincronizamos el período de candado con el del backend.
+    // Sincronizamos el período de candado y moneda con el del backend.
     if (typeof boot.farm.period_lock_days === 'number') {
       periodLockDays.value = boot.farm.period_lock_days
-      persistFarmMeta()
     }
+    persistFarmMeta()
 
     const matchByName = (locals: { localUuid: string; name: string; remoteId?: number }[], remotes: BootCatalog[]) => {
       const out: { localUuid: string; remoteId: number }[] = []
@@ -298,6 +336,42 @@ export const useFarmStore = defineStore('farm', () => {
     persistFarmMeta()
   }
 
+  /**
+   * Persiste la configuración de la granja elegida en el asistente guiado.
+   * Actualiza el estado local (Dexie + localStorage) y, si hay backend,
+   * también lo envía al servidor vía PUT /api/farm.
+   */
+  async function applySetupConfig(config: {
+    periodLockDays?: number
+    currency?: string
+    country?: string
+    timezone?: string
+    locale?: string
+    phone?: string
+  }) {
+    if (config.periodLockDays !== undefined) {
+      periodLockDays.value = Math.max(0, Math.min(365, Math.round(config.periodLockDays)))
+    }
+    persistFarmMeta()
+
+    // Si hay sesión con backend, persistimos también en el servidor.
+    const auth = useAuthStore()
+    if (auth.hasBackendSession) {
+      try {
+        await api.updateFarm({
+          period_lock_days: config.periodLockDays,
+          currency: config.currency,
+          country: config.country,
+          timezone: config.timezone,
+          locale: config.locale,
+          phone: config.phone,
+        })
+      } catch (e) {
+        console.warn('[farm] no se pudo guardar config en backend', e)
+      }
+    }
+  }
+
   function persistFarmMeta() {
     const raw = localStorage.getItem('mg_farm')
     if (!raw) return
@@ -319,6 +393,10 @@ export const useFarmStore = defineStore('farm', () => {
         name: string
         ownerName: string
         periodLockDays?: number
+        currency?: string
+        country?: string
+        timezone?: string
+        locale?: string
       }
       farmId.value = parsed.id
       farmName.value = parsed.name
@@ -355,6 +433,7 @@ export const useFarmStore = defineStore('farm', () => {
     addPen,
     updatePen,
     setPeriodLockDays,
+    applySetupConfig,
     addCatalogItem,
     updateCatalogItem,
     reorderCatalog,

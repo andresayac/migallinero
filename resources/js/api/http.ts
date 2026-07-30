@@ -68,15 +68,38 @@ export const api = {
     return !!localStorage.getItem(TOKEN_KEY)
   },
 
-  /** Auth registro (crea granja) */
-  async register(name: string, username: string, password: string, farmName: string) {
+  /** Auth registro (crea granja). `setup` = configuración del asistente guiado. */
+  async register(
+    name: string,
+    username: string,
+    password: string,
+    farmName: string,
+    setup?: {
+      currency?: string
+      country?: string
+      timezone?: string
+      locale?: string
+      period_lock_days?: number
+      phone?: string
+    },
+  ) {
     const { data } = await http.post('/auth/register', {
       name,
       username,
       password,
       farm_name: farmName,
+      ...setup,
     })
     return data as { token: string; user: unknown; farm: { id: number; name: string } }
+  },
+
+  /** Actualiza la configuración de la granja activa (asistente + ajustes). */
+  async updateFarm(patch: Record<string, unknown>) {
+    const { data } = await http.put('/farm', patch)
+    return data as {
+      farm: { id: number; name: string; period_lock_days: number; currency: string }
+      boot: unknown
+    }
   },
 
   async login(username: string, password: string) {
@@ -96,7 +119,17 @@ export const api = {
   async boot() {
     const { data } = await http.get('/auth/boot')
     return data as {
-      farm: { id: number; name: string; period_lock_days: number }
+      farm: {
+        id: number
+        name: string
+        owner_name?: string
+        phone?: string | null
+        country?: string
+        timezone?: string
+        locale?: string
+        currency?: string
+        period_lock_days: number
+      }
       pens: BootCatalog[]
       egg_categories: BootCatalog[]
       presentations: BootCatalog[]

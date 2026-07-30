@@ -16,6 +16,9 @@ Route::middleware('auth:sanctum', 'active.farm')->group(function () {
     Route::get('/auth/boot', [AuthController::class, 'boot']);
     Route::post('/auth/logout', [AuthController::class, 'logout']);
 
+    // Configuración de la granja activa (asistente guiado + Ajustes)
+    Route::put('/farm', [AuthController::class, 'updateFarm']);
+
     // Resumen del Home (filtrado por granja activa y opcionalmente por galpón)
     Route::get('/dashboard/summary', [DashboardController::class, 'summary']);
 

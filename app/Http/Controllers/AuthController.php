@@ -14,6 +14,11 @@ class AuthController extends Controller
     /**
      * Registro: crea el usuario Y su granja inicial (1 usuario ↔ 1 granja en MVP).
      * Devuelve token Sanctum + datos de la granja.
+     *
+     * Acepta configuración opcional del asistente guiado (setup wizard):
+     * moneda, país, zona horaria, candado de período y teléfono. Si no se
+     * envían, se usan los valores por defecto de Colombia (COP / CO /
+     * America/Bogota / es-CO / 7 días).
      */
     public function register(Request $request)
     {
@@ -22,6 +27,13 @@ class AuthController extends Controller
             'username' => ['required', 'string', 'min:3', 'max:40', 'unique:users,username'],
             'password' => ['required', 'string', 'min:4'],
             'farm_name' => ['required', 'string', 'max:120'],
+            // Configuración opcional del asistente guiado:
+            'currency' => ['sometimes', 'string', 'max:8'],
+            'country' => ['sometimes', 'string', 'max:4'],
+            'timezone' => ['sometimes', 'string', 'max:64'],
+            'locale' => ['sometimes', 'string', 'max:12'],
+            'period_lock_days' => ['sometimes', 'integer', 'min:0', 'max:365'],
+            'phone' => ['sometimes', 'nullable', 'string', 'max:40'],
         ]);
 
         return DB::transaction(function () use ($data) {
@@ -35,7 +47,12 @@ class AuthController extends Controller
             $farm = Farm::create([
                 'name' => $data['farm_name'],
                 'owner_name' => $user->name,
-                'period_lock_days' => 7,
+                'period_lock_days' => $data['period_lock_days'] ?? 7,
+                'currency' => $data['currency'] ?? 'COP',
+                'country' => $data['country'] ?? 'CO',
+                'timezone' => $data['timezone'] ?? 'America/Bogota',
+                'locale' => $data['locale'] ?? 'es-CO',
+                'phone' => $data['phone'] ?? null,
             ]);
 
             // Asignar el usuario como admin de la granja.
@@ -58,6 +75,38 @@ class AuthController extends Controller
                 'boot' => $this->bootData($farm),
             ], 201);
         });
+    }
+
+    /**
+     * Actualiza la configuración de la granja activa (moneda, candado, teléfono…).
+     * Usado por el asistente guiado y por la pantalla de Ajustes.
+     */
+    public function updateFarm(Request $request)
+    {
+        $farm = $request->user()->farms()->first();
+
+        if (! $farm) {
+            return response()->json(['message' => 'No tienes ninguna granja asignada.'], 403);
+        }
+
+        $data = $request->validate([
+            'name' => ['sometimes', 'string', 'max:120'],
+            'owner_name' => ['sometimes', 'string', 'max:120'],
+            'phone' => ['sometimes', 'nullable', 'string', 'max:40'],
+            'country' => ['sometimes', 'string', 'max:4'],
+            'timezone' => ['sometimes', 'string', 'max:64'],
+            'locale' => ['sometimes', 'string', 'max:12'],
+            'currency' => ['sometimes', 'string', 'max:8'],
+            'period_lock_days' => ['sometimes', 'integer', 'min:0', 'max:365'],
+        ]);
+
+        $farm->fill($data);
+        $farm->save();
+
+        return response()->json([
+            'farm' => $farm,
+            'boot' => $this->bootData($farm),
+        ]);
     }
 
     public function login(Request $request)
@@ -123,6 +172,12 @@ class AuthController extends Controller
             'farm' => [
                 'id' => $farm->id,
                 'name' => $farm->name,
+                'owner_name' => $farm->owner_name,
+                'phone' => $farm->phone,
+                'country' => $farm->country,
+                'timezone' => $farm->timezone,
+                'locale' => $farm->locale,
+                'currency' => $farm->currency,
                 'period_lock_days' => $farm->period_lock_days,
             ],
             'pens' => $farm->pens()->orderBy('sort')->get(['id', 'local_uuid', 'name', 'color', 'active', 'sort'])->toArray(),

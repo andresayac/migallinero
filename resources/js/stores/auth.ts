@@ -39,10 +39,25 @@ export const useAuthStore = defineStore('auth', () => {
   /**
    * Registro real: crea usuario + granja en el backend y guarda la sesión.
    * Lanza error con `message` legible si falla (lo captura el componente).
+   *
+   * `setup` es la configuración opcional del asistente guiado (moneda, candado…).
    */
-  async function register(name: string, username: string, password: string, farmName: string) {
+  async function register(
+    name: string,
+    username: string,
+    password: string,
+    farmName: string,
+    setup?: {
+      currency?: string
+      country?: string
+      timezone?: string
+      locale?: string
+      period_lock_days?: number
+      phone?: string
+    },
+  ) {
     try {
-      const data = await api.register(name, username, password, farmName)
+      const data = await api.register(name, username, password, farmName, setup)
       applySession(data.token, {
         id: String((data.user as { id: number }).id),
         name,
