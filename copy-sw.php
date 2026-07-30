@@ -14,6 +14,12 @@ if (file_exists("$buildDir/sw.js")) {
     echo "✓ sw.js copiado a public/\n";
 }
 
+// Copiar manifest.webmanifest a public/ para que tenga scope '/'
+if (file_exists("$buildDir/manifest.webmanifest")) {
+    copy("$buildDir/manifest.webmanifest", "$publicDir/manifest.webmanifest");
+    echo "✓ manifest.webmanifest copiado a public/\n";
+}
+
 // Copiar workbox-*.js a public/
 foreach (glob("$buildDir/workbox-*.js") as $workbox) {
     $dest = $publicDir . '/' . basename($workbox);

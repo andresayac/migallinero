@@ -48,7 +48,8 @@ class AuthController extends Controller
             // Crear catálogos por defecto de la granja.
             $this->seedDefaultCatalogs($farm);
 
-            $token = $user->createToken('mobile')->plainTextToken;
+            $expiresAt = now()->addDays(30);
+            $token = $user->createToken('mobile', ['*'], $expiresAt)->plainTextToken;
 
             return response()->json([
                 'token' => $token,
@@ -74,7 +75,8 @@ class AuthController extends Controller
             ]);
         }
 
-        $token = $user->createToken('mobile')->plainTextToken;
+        $expiresAt = now()->addDays(30);
+        $token = $user->createToken('mobile', ['*'], $expiresAt)->plainTextToken;
         $farm = $user->farms()->first();
 
         return response()->json([

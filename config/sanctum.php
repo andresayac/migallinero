@@ -50,7 +50,9 @@ return [
     |
     */
 
-    'expiration' => null,
+    // Tokens de API duran 30 días. La sesión web (cookie) dura lo mismo
+    // (ver SESSION_LIFETIME en .env). Así el usuario no debe loguear cada rato.
+    'expiration' => (int) env('SANCTUM_EXPIRATION', 43200),
 
     /*
     |--------------------------------------------------------------------------

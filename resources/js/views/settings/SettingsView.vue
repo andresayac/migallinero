@@ -6,6 +6,7 @@ import { useSyncStore } from '@/stores/sync'
 import { useToast } from '@/composables/useToast'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
 import BigButton from '@/components/ui/BigButton.vue'
+import InstallPwaCard from '@/components/feedback/InstallPwaCard.vue'
 
 const router = useRouter()
 const farm = useFarmStore()
@@ -22,6 +23,8 @@ function logout() {
 
 <template>
   <ScreenShell title="Ajustes">
+    <InstallPwaCard />
+
     <div class="card mb-3">
       <p class="text-base font-semibold text-slate-500">Granja</p>
       <p class="text-2xl font-extrabold text-slate-800">{{ farm.farmName || '—' }}</p>

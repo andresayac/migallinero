@@ -14,7 +14,10 @@
     />
     @vite(['resources/css/app.css', 'resources/js/main.ts'])
     {{-- PWA: manifest + service worker registration --}}
-    <link rel="manifest" href="/build/manifest.webmanifest" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Mi Gallinero" />
     <script>
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
