@@ -1,15 +1,11 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 
 const props = withDefaults(
   defineProps<{
-    /** Valor actual (se muestra en pantalla). */
     modelValue: number
-    /** Título que se muestra arriba (nombre de la categoría). */
     title?: string
-    /** Color del título y el botón confirmar. */
     color?: string
-    /** Mostrar o no el keypad. */
     open: boolean
   }>(),
   {
@@ -25,186 +21,175 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
-/** Lo que el usuario va escribiendo (buffer de texto). */
-const buffer = ref('')
+// ── Estado de la calculadora ──────────────────────────────────────
+const current = ref('')
+const prev = ref<number | null>(null)
+const op = ref<string | null>(null)
+const justEvaluated = ref(false)
+
+const expression = computed(() => {
+  if (prev.value === null || op.value === null) return ''
+  const sym = op.value === '*' ? '×' : op.value === '/' ? '÷' : op.value
+  return `${prev.value} ${sym}`
+})
+
+const display = computed(() => {
+  if (current.value !== '') return current.value
+  if (justEvaluated.value && prev.value !== null) return String(prev.value)
+  return '0'
+})
 
 watch(
   () => props.open,
   (isOpen) => {
     if (isOpen) {
-      // Al abrir, precargamos el valor actual como buffer.
-      buffer.value = props.modelValue > 0 ? String(props.modelValue) : ''
+      reset()
+      if (props.modelValue > 0) current.value = String(props.modelValue)
     }
   },
 )
 
-/** Valor numérico actual del buffer. */
-function numValue(): number {
-  return parseInt(buffer.value || '0', 10)
+function reset() {
+  current.value = ''
+  prev.value = null
+  op.value = null
+  justEvaluated.value = false
 }
 
-/** Agrega un dígito (o "00") al buffer. */
 function press(digit: string) {
-  const digitsToAdd = digit.length // "00" añade 2, "5" añade 1
-  if (buffer.value.length + digitsToAdd > 6) return
-  // No permitir 0 como primer dígito.
-  if (buffer.value === '' && digit === '0') return
-  if (buffer.value === '' && digit === '00') return
-  if (buffer.value === '0' && digit !== '0' && digit !== '00') {
-    buffer.value = digit
+  if (justEvaluated.value) reset()
+  if (current.value.length + digit.length > 8) return
+  if (current.value === '' && (digit === '0' || digit === '00')) return
+  if (current.value === '0' && digit !== '0' && digit !== '00') {
+    current.value = digit
   } else {
-    buffer.value += digit
+    current.value += digit
   }
 }
 
-/** Borra el último dígito. */
+function pressOp(nextOp: string) {
+  const cur = parseFloat(current.value || '0')
+  justEvaluated.value = false
+  if (prev.value !== null && op.value !== null && current.value !== '') {
+    prev.value = evaluate(prev.value, cur, op.value)
+    op.value = nextOp
+  } else {
+    prev.value = cur
+    op.value = nextOp
+  }
+  current.value = ''
+}
+
+function pressEquals() {
+  if (prev.value === null || op.value === null) {
+    if (current.value !== '') justEvaluated.value = true
+    return
+  }
+  const cur = parseFloat(current.value || '0')
+  prev.value = evaluate(prev.value, cur, op.value)
+  op.value = null
+  current.value = ''
+  justEvaluated.value = true
+}
+
+function evaluate(a: number, b: number, operator: string): number {
+  switch (operator) {
+    case '+': return a + b
+    case '-': return a - b
+    case '*': return a * b
+    case '/': return b !== 0 ? Math.floor(a / b) : 0
+    default: return b
+  }
+}
+
 function backspace() {
-  buffer.value = buffer.value.slice(0, -1)
+  if (justEvaluated.value) { reset(); return }
+  current.value = current.value.slice(0, -1)
 }
 
-/** Limpia todo el buffer. */
-function clearAll() {
-  buffer.value = ''
+function finalValue(): number {
+  if (prev.value !== null && op.value !== null && current.value !== '') {
+    return evaluate(prev.value, parseFloat(current.value), op.value)
+  }
+  if (justEvaluated.value && prev.value !== null) return prev.value
+  return parseFloat(current.value || '0')
 }
 
-/** Confirma el valor y cierra. */
 function confirm() {
-  const val = numValue()
+  const val = Math.max(0, Math.floor(finalValue()))
   emit('update:modelValue', val)
   emit('confirm', val)
   emit('close')
 }
 
-/** Cierra sin cambiar el valor. */
-function cancel() {
-  emit('close')
-}
+function cancel() { emit('close') }
 
-// Bloquear scroll del body cuando el keypad está abierto.
-onMounted(() => {
-  if (props.open) document.body.style.overflow = 'hidden'
-})
-onUnmounted(() => {
-  document.body.style.overflow = ''
-})
-
-watch(
-  () => props.open,
-  (isOpen) => {
-    document.body.style.overflow = isOpen ? 'hidden' : ''
-  },
-)
-
-/** Atajo de teclado para desktop. */
 function onKeydown(e: KeyboardEvent) {
   if (!props.open) return
   if (e.key >= '0' && e.key <= '9') press(e.key)
+  else if (e.key === '+') pressOp('+')
+  else if (e.key === '-') pressOp('-')
+  else if (e.key === '*') pressOp('*')
+  else if (e.key === '/') pressOp('/')
+  else if (e.key === 'Enter' || e.key === '=') pressEquals()
   else if (e.key === 'Backspace') backspace()
-  else if (e.key === 'Enter') confirm()
   else if (e.key === 'Escape') cancel()
+  else if (e.key === 'c' || e.key === 'C') reset()
 }
 
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+watch(() => props.open, (v) => { document.body.style.overflow = v ? 'hidden' : '' })
+onMounted(() => { if (props.open) document.body.style.overflow = 'hidden'; window.addEventListener('keydown', onKeydown) })
+onUnmounted(() => { document.body.style.overflow = ''; window.removeEventListener('keydown', onKeydown) })
 </script>
 
 <template>
   <Teleport to="body">
     <Transition name="keypad">
-      <div
-        v-if="open"
-        class="keypad-overlay"
-        @click.self="cancel"
-      >
-        <div class="keypad-sheet">
-          <!-- Encabezado -->
-          <div class="keypad-header">
-            <button
-              type="button"
-              class="keypad-btn-cancel"
-              @click="cancel"
-            >
-              Cancelar
-            </button>
-            <span
-              class="keypad-title"
-              :style="{ color: color }"
-            >
-              {{ title }}
-            </span>
-            <button
-              type="button"
-              class="keypad-btn-confirm"
-              :style="{ background: color }"
-              @click="confirm"
-            >
-              Listo
-            </button>
+      <div v-if="open" class="kp-overlay" @click.self="cancel">
+        <div class="kp-sheet">
+          <!-- Header -->
+          <div class="kp-header">
+            <button type="button" class="kp-btn kp-btn-cancel" @click="cancel">Cancelar</button>
+            <span class="kp-title" :style="{ color }">{{ title }}</span>
+            <button type="button" class="kp-btn kp-btn-ok" :style="{ background: color }" @click="confirm">Listo</button>
           </div>
 
           <!-- Display -->
-          <div class="keypad-display">
-            <span class="keypad-digits" :style="{ color: color }">
-              {{ buffer || '0' }}
-            </span>
+          <div class="kp-display">
+            <span v-if="expression" class="kp-expr">{{ expression }}</span>
+            <span class="kp-value" :style="{ color }">{{ display }}</span>
           </div>
 
-          <!-- Teclado numérico -->
-          <div class="keypad-grid">
-            <button
-              v-for="d in ['1', '2', '3', '4', '5', '6', '7', '8', '9']"
-              :key="d"
-              type="button"
-              class="keypad-digit"
-              @click="press(d)"
-            >
-              {{ d }}
+          <!-- Grid 4×5 -->
+          <div class="kp-grid">
+            <button type="button" class="kp-fn kp-clear" @click="reset">C</button>
+            <button type="button" class="kp-op" @click="pressOp('/')">÷</button>
+            <button type="button" class="kp-op" @click="pressOp('*')">×</button>
+            <button type="button" class="kp-fn kp-back" @click="backspace">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"/>
+                <line x1="18" y1="9" x2="12" y2="15"/><line x1="12" y1="9" x2="18" y2="15"/>
+              </svg>
             </button>
 
-            <!-- Fila inferior: C / 0 / 00 / ← -->
-            <div class="keypad-bottom-row">
-              <button
-                type="button"
-                class="keypad-func keypad-clear"
-                @click="clearAll"
-              >
-                C
-              </button>
-              <button
-                type="button"
-                class="keypad-digit"
-                @click="press('0')"
-              >
-                0
-              </button>
-              <button
-                type="button"
-                class="keypad-digit keypad-double"
-                @click="press('00')"
-              >
-                00
-              </button>
-              <button
-                type="button"
-                class="keypad-func keypad-back"
-                @click="backspace"
-              >
-                <svg
-                  width="32"
-                  height="32"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z" />
-                  <line x1="18" y1="9" x2="12" y2="15" />
-                  <line x1="12" y1="9" x2="18" y2="15" />
-                </svg>
-              </button>
-            </div>
+            <button type="button" class="kp-num" @click="press('7')">7</button>
+            <button type="button" class="kp-num" @click="press('8')">8</button>
+            <button type="button" class="kp-num" @click="press('9')">9</button>
+            <button type="button" class="kp-op" @click="pressOp('-')">−</button>
+
+            <button type="button" class="kp-num" @click="press('4')">4</button>
+            <button type="button" class="kp-num" @click="press('5')">5</button>
+            <button type="button" class="kp-num" @click="press('6')">6</button>
+            <button type="button" class="kp-op" @click="pressOp('+')">+</button>
+
+            <button type="button" class="kp-num" @click="press('1')">1</button>
+            <button type="button" class="kp-num" @click="press('2')">2</button>
+            <button type="button" class="kp-num" @click="press('3')">3</button>
+            <button type="button" class="kp-eq kp-eq-tall" :style="{ background: color }" @click="pressEquals">=</button>
+
+            <button type="button" class="kp-num kp-wide" @click="press('00')">00</button>
+            <button type="button" class="kp-num" @click="press('0')">0</button>
           </div>
         </div>
       </div>
@@ -213,7 +198,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </template>
 
 <style scoped>
-.keypad-overlay {
+/* ── Overlay ───────────────────────────────────── */
+.kp-overlay {
   position: fixed;
   inset: 0;
   z-index: 9999;
@@ -224,152 +210,120 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   backdrop-filter: blur(4px);
   -webkit-tap-highlight-color: transparent;
 }
-
-.keypad-sheet {
+.kp-sheet {
   width: 100%;
   max-width: 480px;
   border-radius: 1.25rem 1.25rem 0 0;
-  background: #f8fafc;
-  padding: 0.75rem 0.75rem calc(env(safe-area-inset-bottom, 0px) + 0.75rem);
+  background: #f1f5f9;
+  padding: 0.6rem 0.6rem calc(env(safe-area-inset-bottom, 0px) + 0.6rem);
   box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.15);
   user-select: none;
   -webkit-user-select: none;
 }
 
-/* Header */
-.keypad-header {
+/* ── Header ────────────────────────────────────── */
+.kp-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.25rem 0.5rem 0.75rem;
+  padding: 0.15rem 0.25rem 0.5rem;
 }
-
-.keypad-title {
-  font-size: 1.125rem;
-  font-weight: 800;
-}
-
-.keypad-btn-cancel,
-.keypad-btn-confirm {
-  min-height: 2.75rem;
-  min-width: 5rem;
-  border-radius: 0.75rem;
-  font-size: 1rem;
+.kp-title { font-size: 1.05rem; font-weight: 800; }
+.kp-btn {
+  min-height: 2.5rem;
+  min-width: 4.5rem;
+  border-radius: 0.7rem;
+  font-size: 0.95rem;
   font-weight: 700;
-  padding: 0 1rem;
+  padding: 0 0.85rem;
   border: none;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
+.kp-btn-cancel { background: #e2e8f0; color: #475569; }
+.kp-btn-ok { color: #fff; }
 
-.keypad-btn-cancel {
-  background: #e2e8f0;
-  color: #475569;
-}
-
-.keypad-btn-confirm {
-  color: white;
-}
-
-/* Display */
-.keypad-display {
+/* ── Display ───────────────────────────────────── */
+.kp-display {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0.5rem 1rem 1rem;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 0.25rem 0.75rem 0.5rem;
+  min-height: 5rem;
 }
-
-.keypad-digits {
-  font-size: 3.5rem;
+.kp-expr {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #94a3b8;
+  letter-spacing: 0.02em;
+  min-height: 1.4rem;
+}
+.kp-value {
+  font-size: 3rem;
   font-weight: 900;
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
-  min-height: 4.5rem;
-  line-height: 4.5rem;
+  line-height: 1.1;
 }
 
-/* Grid de dígitos */
-.keypad-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 0.5rem;
-}
-
-.keypad-bottom-row {
-  grid-column: 1 / -1;
+/* ── Grid 4 columnas ──────────────────────────── */
+.kp-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 0.5rem;
+  gap: 0.4rem;
 }
 
-.keypad-digit {
+/* ── Botones base ──────────────────────────────── */
+.kp-grid button {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 4rem;
-  border-radius: 0.75rem;
-  background: white;
+  border: none;
+  border-radius: 0.7rem;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.06s, transform 0.06s;
+}
+.kp-grid button:active { transform: scale(0.94); }
+
+/* Números */
+.kp-num {
+  height: 3.6rem;
+  background: #fff;
   color: #1e293b;
-  font-size: 1.75rem;
+  font-size: 1.5rem;
   font-weight: 700;
-  border: none;
-  cursor: pointer;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
-  -webkit-tap-highlight-color: transparent;
-  transition: background 0.08s, transform 0.08s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }
+.kp-num:active { background: #e2e8f0; }
+.kp-wide { grid-column: span 2; }
 
-.keypad-digit:active {
-  background: #e2e8f0;
-  transform: scale(0.95);
-}
-
-.keypad-func {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 4rem;
-  border-radius: 0.75rem;
-  font-size: 1.25rem;
+/* Operadores */
+.kp-op {
+  height: 3.6rem;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 1.5rem;
   font-weight: 800;
-  border: none;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  transition: background 0.08s, transform 0.08s;
 }
+.kp-op:active { background: #bfdbfe; }
 
-.keypad-func:active {
-  transform: scale(0.95);
-}
+/* Funciones */
+.kp-fn { height: 3.6rem; font-size: 1.15rem; font-weight: 800; }
+.kp-clear { background: #fee2e2; color: #dc2626; }
+.kp-clear:active { background: #fecaca; }
+.kp-back { background: #e2e8f0; color: #475569; }
+.kp-back:active { background: #cbd5e1; }
 
-.keypad-clear {
-  background: #fee2e2;
-  color: #dc2626;
-}
+/* = alto (2 filas) */
+.kp-eq { color: #fff; font-size: 1.6rem; font-weight: 900; }
+.kp-eq-tall { grid-row: span 2; }
+.kp-eq:active { filter: brightness(0.9); }
 
-.keypad-back {
-  background: #e2e8f0;
-  color: #475569;
-}
-
-/* Transición slide-up */
-.keypad-enter-active,
-.keypad-leave-active {
-  transition: opacity 0.2s ease, transform 0.25s ease;
-}
-
-.keypad-enter-from,
-.keypad-leave-to {
-  opacity: 0;
-}
-
-.keypad-enter-from .keypad-sheet,
-.keypad-leave-to .keypad-sheet {
-  transform: translateY(100%);
-}
-
-.keypad-enter-active .keypad-sheet,
-.keypad-leave-active .keypad-sheet {
-  transition: transform 0.25s ease;
-}
+/* ── Transición ────────────────────────────────── */
+.keypad-enter-active, .keypad-leave-active { transition: opacity 0.2s ease; }
+.keypad-enter-active .kp-sheet, .keypad-leave-active .kp-sheet { transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1); }
+.keypad-enter-from, .keypad-leave-to { opacity: 0; }
+.keypad-enter-from .kp-sheet, .keypad-leave-to .kp-sheet { transform: translateY(100%); }
 </style>
