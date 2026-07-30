@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    /* Texto base grande para adultos mayores */
+    font-size: 18px;
+  }
+  body {
+    @apply bg-brand-50 text-slate-800 font-sans antialiased;
+  }
+}
+
+@layer components {
+  /* Botón de acción principal grande — color de marca */
+  .btn-action {
+    @apply inline-flex min-h-touch min-w-touch items-center justify-center gap-3
+           rounded-xl2 bg-grass-500 px-6 py-4 text-xl font-bold text-white
+           shadow-sm transition active:scale-[0.98] active:bg-grass-600
+           disabled:opacity-40 disabled:active:scale-100;
+  }
+  .btn-action--amber {
+    @apply bg-brand-500 active:bg-brand-600;
+  }
+  .btn-action--alert {
+    @apply bg-alert-500 active:bg-alert-600;
+  }
+  .btn-action--ghost {
+    @apply bg-white text-slate-700 border-2 border-slate-200 active:bg-slate-50;
+  }
+
+  /* Contenedor con cabecera y botón de inicio fijo */
+  .screen {
+    @apply mx-auto flex min-h-[100dvh] w-full max-w-2xl flex-col px-4 pb-28;
+  }
+
+  /* Tarjeta resumen */
+  .card {
+    @apply rounded-xl2 bg-white p-4 shadow-sm ring-1 ring-slate-100;
+  }
+
+  /* Número grande de los resúmenes */
+  .num-big {
+    @apply text-mega font-extrabold tracking-tight text-grass-600;
+  }
+}

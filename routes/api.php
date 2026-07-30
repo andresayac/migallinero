@@ -1,0 +1,39 @@
+<?php
+
+use App\Http\Controllers\AuthController;
+use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\ResourceController;
+use App\Http\Controllers\SyncController;
+use Illuminate\Support\Facades\Route;
+
+// Auth pública (registro crea granja + devuelve token Sanctum)
+Route::post('/auth/register', [AuthController::class, 'register']);
+Route::post('/auth/login', [AuthController::class, 'login']);
+
+// Auth requerida
+Route::middleware('auth:sanctum', 'active.farm')->group(function () {
+    Route::get('/auth/me', [AuthController::class, 'me']);
+    Route::get('/auth/boot', [AuthController::class, 'boot']);
+    Route::post('/auth/logout', [AuthController::class, 'logout']);
+
+    // Resumen del Home (filtrado por granja activa y opcionalmente por galpón)
+    Route::get('/dashboard/summary', [DashboardController::class, 'summary']);
+
+    // CRUD genérico multi-tenant por entidad
+    Route::get('/{entity}', [ResourceController::class, 'index'])
+        ->where('entity', 'pens|egg_categories|presentations|mortality_causes|egg_collections|chicken_movements|vaccines|incidents|customers|sales|payments');
+    Route::post('/{entity}', [ResourceController::class, 'store'])
+        ->where('entity', 'pens|egg_categories|presentations|mortality_causes|egg_collections|chicken_movements|vaccines|incidents|customers|sales|payments');
+    Route::get('/{entity}/{id}', [ResourceController::class, 'show'])
+        ->where('entity', 'pens|egg_categories|presentations|mortality_causes|egg_collections|chicken_movements|vaccines|incidents|customers|sales|payments')
+        ->whereNumber('id');
+    Route::put('/{entity}/{id}', [ResourceController::class, 'update'])
+        ->where('entity', 'pens|egg_categories|presentations|mortality_causes|egg_collections|chicken_movements|vaccines|incidents|customers|sales|payments')
+        ->whereNumber('id');
+    Route::delete('/{entity}/{id}', [ResourceController::class, 'destroy'])
+        ->where('entity', 'pens|egg_categories|presentations|mortality_causes|egg_collections|chicken_movements|vaccines|incidents|customers|sales|payments')
+        ->whereNumber('id');
+
+    // Sincronización offline idempotente
+    Route::post('/sync/push', [SyncController::class, 'push']);
+});
