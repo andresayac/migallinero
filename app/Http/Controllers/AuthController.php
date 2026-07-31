@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Farm;
+use App\Models\FeedType;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -188,6 +189,7 @@ class AuthController extends Controller
                 'id', 'local_uuid', 'code', 'name', 'units_per_pack', 'sort',
             ])->toArray(),
             'mortality_causes' => $farm->mortalityCauses()->orderBy('sort')->get(['id', 'local_uuid', 'name', 'sort'])->toArray(),
+            'feed_types' => $farm->feedTypes()->orderBy('sort')->get(['id', 'local_uuid', 'name', 'unit', 'active', 'sort'])->toArray(),
         ];
     }
 
@@ -249,6 +251,17 @@ class AuthController extends Controller
                 'units_per_pack' => $units,
                 'sort' => $presOrder++,
                 'active' => true,
+            ]);
+        }
+
+        // Tipos de alimento por defecto.
+        $feedOrder = 1;
+        foreach (['Concentrado de inicial', 'Concentrado de levante', 'Concentrado de postura', 'Purina', 'Maíz'] as $feedName) {
+            $farm->feedTypes()->create([
+                'name' => $feedName,
+                'unit' => 'kg',
+                'active' => true,
+                'sort' => $feedOrder++,
             ]);
         }
     }

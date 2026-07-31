@@ -60,4 +60,14 @@ class Farm extends Model
     {
         return $this->hasMany(ChickenMovement::class);
     }
+
+    public function feedTypes(): HasMany
+    {
+        return $this->hasMany(FeedType::class);
+    }
+
+    public function feedRecords(): HasMany
+    {
+        return $this->hasMany(FeedRecord::class);
+    }
 }

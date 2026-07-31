@@ -6,6 +6,9 @@ use App\Models\ChickenMovement;
 use App\Models\Customer;
 use App\Models\EggCategory;
 use App\Models\EggCollection;
+use App\Models\FeedRecord;
+use App\Models\FeedPurchase;
+use App\Models\FeedType;
 use App\Models\Incident;
 use App\Models\MortalityCause;
 use App\Models\Payment;
@@ -42,6 +45,9 @@ class ResourceController extends Controller
         'customers' => Customer::class,
         'sales' => Sale::class,
         'payments' => Payment::class,
+        'feed_types' => FeedType::class,
+        'feed_records' => FeedRecord::class,
+        'feed_purchases' => FeedPurchase::class,
     ];
 
     public function index(Request $request, string $entity)
@@ -50,11 +56,14 @@ class ResourceController extends Controller
         $builder = $model::query();
 
         // Carga selectiva de relaciones para entidades con líneas.
-        if ($entity === 'sales' || $entity === 'egg_collections') {
+        if (in_array($entity, ['sales', 'egg_collections', 'feed_records', 'feed_purchases'])) {
             $builder->with(['lines']);
         }
         if ($entity === 'sales') {
             $builder->with(['customer']);
+        }
+        if ($entity === 'feed_records') {
+            $builder->with(['pen']);
         }
 
         $limit = min($request->integer('per_page', 100), 500);
@@ -159,6 +168,16 @@ class ResourceController extends Controller
                     $instance->lines()->create($this->camelToSnake($line));
                 }
                 break;
+            case $instance instanceof FeedRecord:
+                foreach ($lines as $line) {
+                    $instance->lines()->create($this->camelToSnake($line));
+                }
+                break;
+            case $instance instanceof FeedPurchase:
+                foreach ($lines as $line) {
+                    $instance->lines()->create($this->camelToSnake($line));
+                }
+                break;
         }
     }
 
@@ -167,6 +186,8 @@ class ResourceController extends Controller
         return match (true) {
             $model instanceof Sale, is_string($model) && $model === Sale::class => ['customer', 'lines'],
             $model instanceof EggCollection, is_string($model) && $model === EggCollection::class => ['lines', 'pen'],
+            $model instanceof FeedRecord, is_string($model) && $model === FeedRecord::class => ['lines', 'pen'],
+            $model instanceof FeedPurchase, is_string($model) && $model === FeedPurchase::class => ['lines'],
             default => [],
         };
     }
