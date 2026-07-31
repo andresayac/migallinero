@@ -53,6 +53,8 @@ watch(() => farm.activePenId, () => refresh())
 // Menú grande — una sola tarea principal por botón.
 const menu = computed(() => [
   { to: '/eggs/new', icon: 'egg', color: 'amber', label: 'Huevos' },
+  { to: '/feed/purchase', icon: 'money', color: 'amber', label: 'Comprar alimento' },
+  { to: '/feed/new', icon: 'chicken', color: 'grass', label: 'Consumo alimento' },
   { to: '/chickens', icon: 'chicken', color: 'grass', label: 'Gallinas' },
   { to: '/chickens/mortality/new', icon: 'skull', color: 'alert', label: 'Muerte' },
   { to: '/sales/new', icon: 'money', color: 'grass', label: 'Vender' },

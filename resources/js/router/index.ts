@@ -32,6 +32,16 @@ const router = createRouter({
       component: () => import('@/views/eggs/EggInventoryView.vue'),
     },
     {
+      path: '/feed/new',
+      name: 'feed-new',
+      component: () => import('@/views/feed/FeedRecordEditView.vue'),
+    },
+    {
+      path: '/feed/purchase',
+      name: 'feed-purchase',
+      component: () => import('@/views/feed/FeedPurchaseEditView.vue'),
+    },
+    {
       path: '/chickens',
       name: 'chickens',
       component: () => import('@/views/chickens/ChickensView.vue'),

@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { db } from '@/db/db'
 import { api, type BootCatalog } from '@/api/http'
-import type { EggCategory, Pen, MortalityCause, Presentation } from '@/types/domain'
+import type { EggCategory, Pen, MortalityCause, Presentation, FeedType } from '@/types/domain'
 import { uuid, nowISO } from '@/utils/format'
 import { useAuthStore } from './auth'
 
@@ -26,6 +26,7 @@ export const useFarmStore = defineStore('farm', () => {
   const pens = ref<Pen[]>([])
   const causes = ref<MortalityCause[]>([])
   const presentations = ref<Presentation[]>([])
+  const feedTypes = ref<FeedType[]>([])
 
   /** Galpón activo para filtrar. '' = "Todos los galpones". */
   const activePenId = ref<string>('')
@@ -42,16 +43,18 @@ export const useFarmStore = defineStore('farm', () => {
   /** Recolecta los catálogos de la granja activa desde Dexie. */
   async function loadCatalogs() {
     if (!farmId.value) return
-    const [cats, ps, cs, pres] = await Promise.all([
+    const [cats, ps, cs, pres, ft] = await Promise.all([
       db.eggCategories.where('farmId').equals(farmId.value).toArray(),
       db.pens.where('farmId').equals(farmId.value).toArray(),
       db.mortalityCauses.where('farmId').equals(farmId.value).toArray(),
       db.presentations.where('farmId').equals(farmId.value).toArray(),
+      db.feedTypes.where('farmId').equals(farmId.value).toArray(),
     ])
     categories.value = cats.sort((a, b) => a.sort - b.sort)
     pens.value = ps.sort((a, b) => a.sort - b.sort)
     causes.value = cs.sort((a, b) => a.sort - b.sort)
     presentations.value = pres.sort((a, b) => a.sort - b.sort)
+    feedTypes.value = ft.sort((a, b) => a.sort - b.sort)
 
     // Restaurar galpón activo guardado (si sigue existiendo).
     const saved = localStorage.getItem('mg_active_pen')
@@ -77,6 +80,7 @@ export const useFarmStore = defineStore('farm', () => {
       pens?: Array<{ name: string; color: string }>
       causes?: Array<{ name: string }>
       presentations?: Array<{ code: string; name: string; unitsPerPack: number }>
+      feedTypes?: Array<{ name: string; unit: string }>
     },
     config?: {
       periodLockDays?: number
@@ -141,11 +145,23 @@ export const useFarmStore = defineStore('farm', () => {
       code: p.code as Presentation['code'], name: p.name, unitsPerPack: p.unitsPerPack,
     }))
 
-    await db.transaction('rw', [db.eggCategories, db.pens, db.mortalityCauses, db.presentations], async () => {
+    // Tipos de alimento: personalizados o por defecto.
+    const defaultFeedTypes: FeedType[] = (catalogs?.feedTypes ?? [
+      { name: 'Concentrado de inicial', unit: 'kg' },
+      { name: 'Concentrado de levante', unit: 'kg' },
+      { name: 'Concentrado de postura', unit: 'kg' },
+      { name: 'Purina', unit: 'kg' },
+      { name: 'Maíz', unit: 'kg' },
+    ]).map((f, i) => ({
+      ...base, localUuid: uuid(), sort: i + 1, active: true, ...f,
+    }))
+
+    await db.transaction('rw', [db.eggCategories, db.pens, db.mortalityCauses, db.presentations, db.feedTypes], async () => {
       await db.eggCategories.bulkAdd(eggCats)
       await db.pens.bulkAdd(defaultPens)
       await db.mortalityCauses.bulkAdd(defaultCauses)
       await db.presentations.bulkAdd(defaultPres)
+      await db.feedTypes.bulkAdd(defaultFeedTypes)
     })
 
     const lockDays = config?.periodLockDays ?? 7
@@ -189,7 +205,7 @@ export const useFarmStore = defineStore('farm', () => {
    * `kind` define qué tabla usar; cada registro queda con pendingSync=true
    * para que viaje con la siguiente sincronización.
    */
-  type CatalogKind = 'egg_categories' | 'mortality_causes' | 'presentations'
+  type CatalogKind = 'egg_categories' | 'mortality_causes' | 'presentations' | 'feed_types'
   // Tipado como any porque cada tabla Dexie tiene un genérico distinto y
   // aquí sólo nos interesa una operación CRUD uniforme.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -197,9 +213,10 @@ export const useFarmStore = defineStore('farm', () => {
     egg_categories: db.eggCategories,
     mortality_causes: db.mortalityCauses,
     presentations: db.presentations,
+    feed_types: db.feedTypes,
   }
 
-  async function addCatalogItem(kind: CatalogKind, data: Partial<EggCategory & MortalityCause & Presentation>): Promise<string> {
+  async function addCatalogItem(kind: CatalogKind, data: Partial<EggCategory & MortalityCause & Presentation & FeedType>): Promise<string> {
     const auth = useAuthStore()
     const ts = nowISO()
     const table = catalogTable[kind]
@@ -314,12 +331,14 @@ export const useFarmStore = defineStore('farm', () => {
     const cats = (await db.eggCategories.where('farmId').equals(farmId.value).toArray()) as WithUuid[]
     const pres = (await db.presentations.where('farmId').equals(farmId.value).toArray()) as WithUuid[]
     const causes = (await db.mortalityCauses.where('farmId').equals(farmId.value).toArray()) as WithUuid[]
+    const fts = (await db.feedTypes.where('farmId').equals(farmId.value).toArray()) as WithUuid[]
 
     const matches = [
       ...matchByName(pens, boot.pens).map((m) => ({ store: db.pens, ...m })),
       ...matchByName(cats, boot.egg_categories).map((m) => ({ store: db.eggCategories, ...m })),
       ...matchByName(pres, boot.presentations).map((m) => ({ store: db.presentations, ...m })),
       ...matchByName(causes, boot.mortality_causes).map((m) => ({ store: db.mortalityCauses, ...m })),
+      ...matchByName(fts, boot.feed_types ?? []).map((m) => ({ store: db.feedTypes, ...m })),
     ]
 
     for (const m of matches) {
@@ -424,6 +443,7 @@ export const useFarmStore = defineStore('farm', () => {
     activePen,
     causes,
     presentations,
+    feedTypes,
     isConfigured,
     sellableCategories,
     loadCatalogs,

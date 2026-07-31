@@ -95,6 +95,57 @@ export interface Presentation extends OfflineRecord {
   active: boolean
 }
 
+/** Tipo de alimento (catálogo por granja). */
+export interface FeedType extends OfflineRecord {
+  name: string
+  unit: string // kg, libra, bulto, saco
+  active: boolean
+  sort: number
+}
+
+/** Registro de consumo de alimento (tanda/entrega). */
+export interface FeedRecord extends OfflineRecord {
+  type: 'feed-record'
+  penId: string
+  recordedAt: string
+  shift: 'morning' | 'afternoon'
+  observation?: string
+  totalQty: number   // suma de cantidades (desnormalizado)
+  totalCost: number  // suma de costos (COP enteros)
+  lines: FeedRecordLine[]
+}
+
+/** Línea de un registro de alimento. */
+export interface FeedRecordLine {
+  feedTypeId: string
+  feedTypeName?: string // snapshot histórico
+  qty: number          // cantidad consumida (kg, libras…)
+  unitCost: number     // costo por unidad en COP
+  subtotal: number     // qty × unitCost
+}
+
+/** Compra de alimento (bultos/sacos). */
+export interface FeedPurchase extends OfflineRecord {
+  type: 'feed-purchase'
+  purchasedAt: string
+  supplier?: string
+  observation?: string
+  totalBags: number   // total de bultos
+  totalQty: number    // total kg (bultos × kg por bulto)
+  totalCost: number   // costo total COP
+  lines: FeedPurchaseLine[]
+}
+
+/** Línea de una compra de alimento. */
+export interface FeedPurchaseLine {
+  feedTypeId: string
+  feedTypeName?: string // snapshot histórico
+  bags: number          // bultos comprados
+  kgPerBag: number      // kg que trae cada bulto (40, 50…)
+  unitCost: number      // costo por bulto en COP
+  subtotal: number      // bags × unitCost
+}
+
 export interface Customer extends OfflineRecord {
   name: string
   phone?: string

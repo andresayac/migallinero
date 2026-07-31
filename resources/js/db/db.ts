@@ -4,6 +4,9 @@ import type {
   Pen,
   MortalityCause,
   Presentation,
+  FeedType,
+  FeedRecord,
+  FeedPurchase,
   Customer,
   EggCollection,
   ChickenMovement,
@@ -27,6 +30,9 @@ export class MiGallineroDB extends Dexie {
   pens!: Table<Pen, string>
   mortalityCauses!: Table<MortalityCause, string>
   presentations!: Table<Presentation, string>
+  feedTypes!: Table<FeedType, string>
+  feedRecords!: Table<FeedRecord, string>
+  feedPurchases!: Table<FeedPurchase, string>
   customers!: Table<Customer, string>
   eggCollections!: Table<EggCollection, string>
   chickenMovements!: Table<ChickenMovement, string>
@@ -57,6 +63,12 @@ export class MiGallineroDB extends Dexie {
       sales: 'localUuid, farmId, remoteId, customerId, soldAt, status, pendingSync',
       payments: 'localUuid, farmId, remoteId, saleId, customerId, paidAt',
       syncQueue: '++id, farmId, entity, localUuid, createdAt',
+    })
+
+    this.version(2).stores({
+      feedTypes: 'localUuid, farmId, remoteId, sort, active',
+      feedRecords: 'localUuid, farmId, remoteId, penId, recordedAt, shift, pendingSync',
+      feedPurchases: 'localUuid, farmId, remoteId, purchasedAt, pendingSync',
     })
   }
 }

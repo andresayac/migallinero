@@ -134,6 +134,7 @@ export const api = {
       egg_categories: BootCatalog[]
       presentations: BootCatalog[]
       mortality_causes: BootCatalog[]
+      feed_types: BootCatalog[]
     }
   },
 

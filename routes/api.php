@@ -23,18 +23,20 @@ Route::middleware('auth:sanctum', 'active.farm')->group(function () {
     Route::get('/dashboard/summary', [DashboardController::class, 'summary']);
 
     // CRUD genérico multi-tenant por entidad
+    $entityPattern = 'pens|egg_categories|presentations|mortality_causes|egg_collections|chicken_movements|vaccines|incidents|customers|sales|payments|feed_types|feed_records|feed_purchases';
+
     Route::get('/{entity}', [ResourceController::class, 'index'])
-        ->where('entity', 'pens|egg_categories|presentations|mortality_causes|egg_collections|chicken_movements|vaccines|incidents|customers|sales|payments');
+        ->where('entity', $entityPattern);
     Route::post('/{entity}', [ResourceController::class, 'store'])
-        ->where('entity', 'pens|egg_categories|presentations|mortality_causes|egg_collections|chicken_movements|vaccines|incidents|customers|sales|payments');
+        ->where('entity', $entityPattern);
     Route::get('/{entity}/{id}', [ResourceController::class, 'show'])
-        ->where('entity', 'pens|egg_categories|presentations|mortality_causes|egg_collections|chicken_movements|vaccines|incidents|customers|sales|payments')
+        ->where('entity', $entityPattern)
         ->whereNumber('id');
     Route::put('/{entity}/{id}', [ResourceController::class, 'update'])
-        ->where('entity', 'pens|egg_categories|presentations|mortality_causes|egg_collections|chicken_movements|vaccines|incidents|customers|sales|payments')
+        ->where('entity', $entityPattern)
         ->whereNumber('id');
     Route::delete('/{entity}/{id}', [ResourceController::class, 'destroy'])
-        ->where('entity', 'pens|egg_categories|presentations|mortality_causes|egg_collections|chicken_movements|vaccines|incidents|customers|sales|payments')
+        ->where('entity', $entityPattern)
         ->whereNumber('id');
 
     // Sincronización offline idempotente

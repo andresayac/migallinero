@@ -25,6 +25,11 @@ const ENTITY_MAP: Record<string, string> = {
   'egg-category': 'egg_categories',
   'presentation': 'presentations',
   'mortality-cause': 'mortality_causes',
+  'feed-type': 'feed_types',
+  'feed-record': 'feed_records',
+  'feed-record-line': 'feed_record_lines',
+  'feed-purchase': 'feed_purchases',
+  'feed-purchase-line': 'feed_purchase_lines',
 }
 
 /**
@@ -33,7 +38,7 @@ const ENTITY_MAP: Record<string, string> = {
  * El backend ya lo resuelve vía local_uuid por si acaso, pero hacerlo acá
  * evita la mayoría de los casos de FK truncada.
  */
-const FK_FIELDS = ['penId', 'categoryId', 'presentationId', 'customerId', 'saleId', 'eggCollectionId']
+const FK_FIELDS = ['penId', 'categoryId', 'presentationId', 'customerId', 'saleId', 'eggCollectionId', 'feedTypeId']
 
 /**
  * Reemplaza los localUuid de FKs por los remoteId mapeados en Dexie.
@@ -53,6 +58,7 @@ async function translateFks(payload: Record<string, unknown>): Promise<Record<st
     customerId: db.customers,
     saleId: db.sales,
     eggCollectionId: db.eggCollections,
+    feedTypeId: db.feedTypes,
   }
 
   const out = { ...payload }

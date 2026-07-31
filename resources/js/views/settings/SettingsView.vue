@@ -36,6 +36,8 @@ function logout() {
         @click="router.push('/settings/pens')" />
       <BigButton label="Categorías y causas" icon="egg" color="ghost" size="block"
         @click="router.push('/settings/catalogs')" />
+      <BigButton label="Tipos de alimento" icon="chicken" color="ghost" size="block"
+        @click="router.push('/settings/catalogs')" />
       <BigButton label="Ventas" icon="money" color="ghost" size="block"
         @click="router.push('/sales')" />
       <BigButton label="Historial de cambios" icon="clipboard" color="ghost" size="block"
