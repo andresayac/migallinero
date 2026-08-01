@@ -27,7 +27,19 @@ export default {
         },
       },
       fontFamily: {
-        sans: ['Inter', 'Roboto', 'system-ui', 'sans-serif'],
+        // Pila del sistema: se ve nativa en cada plataforma, no requiere ninguna
+        // descarga y funciona sin conexión. Antes dependía de Inter servida desde
+        // Google Fonts, que en una PWA offline simplemente no cargaba.
+        sans: [
+          'system-ui',
+          '-apple-system',
+          'Segoe UI',
+          'Roboto',
+          'Helvetica Neue',
+          'Noto Sans',
+          'Arial',
+          'sans-serif',
+        ],
       },
       fontSize: {
         // Tamaños grandes para adultos mayores

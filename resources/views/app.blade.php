@@ -6,23 +6,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#fffbeb" />
     <title>Mi Gallinero</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-      rel="stylesheet"
-    />
+    {{-- Sin fuentes de CDN: en una PWA offline no cargan, y además envían la
+         IP del usuario a un tercero. Usamos la pila de fuentes del sistema
+         (definida en app.css), que se ve nativa y no cuesta ninguna descarga. --}}
     @vite(['resources/css/app.css', 'resources/js/main.ts'])
     {{-- PWA: manifest + service worker registration --}}
     <link rel="manifest" href="/manifest.webmanifest" />
+    {{-- `mobile-web-app-capable` es el estándar; el prefijo apple- está obsoleto
+         pero se mantiene para iOS antiguos. --}}
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Mi Gallinero" />
     <script>
-      if ('serviceWorker' in navigator) {
+      // El SW se sirve desde la raíz (copy-sw.php lo mueve ahí tras el build)
+      // para tener scope '/'. Sólo en producción: en desarrollo el service
+      // worker sirve módulos cacheados y provoca depuraciones fantasma.
+      if ('serviceWorker' in navigator && @json(app()->isProduction())) {
         window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/sw.js')
-            .catch(err => console.warn('SW registration failed:', err));
+          navigator.serviceWorker.register('/sw.js', { scope: '/' })
+            .catch(err => console.warn('No se pudo registrar el service worker:', err));
         });
       }
     </script>
