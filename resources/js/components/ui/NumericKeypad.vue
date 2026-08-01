@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { computed, toRef, watch, onMounted, onUnmounted } from 'vue'
+import { useCalculator, type CalculatorOperator } from '@/composables/useCalculator'
 
 const props = withDefaults(
   defineProps<{
@@ -7,11 +8,21 @@ const props = withDefaults(
     title?: string
     color?: string
     open: boolean
+    /**
+     * Decimales admitidos. Los kilos por bulto (40,5) y las cantidades de
+     * alimento son decimales en la base de datos; con 0 el teclado sólo acepta
+     * enteros y oculta la tecla de coma.
+     */
+    decimals?: number
+    /** Permite valores negativos (ajustes de inventario que restan). */
+    allowNegative?: boolean
   }>(),
   {
     title: '',
     color: '#16a34a',
     open: false,
+    decimals: 0,
+    allowNegative: false,
   },
 )
 
@@ -21,125 +32,66 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
-// ── Estado de la calculadora ──────────────────────────────────────
-const current = ref('')
-const prev = ref<number | null>(null)
-const op = ref<string | null>(null)
-const justEvaluated = ref(false)
-
-const expression = computed(() => {
-  if (prev.value === null || op.value === null) return ''
-  const sym = op.value === '*' ? '×' : op.value === '/' ? '÷' : op.value
-  return `${prev.value} ${sym}`
+/**
+ * La máquina de estados vive en `useCalculator` para poder probarla sin montar
+ * el componente: sus fallos sólo aparecen en secuencias de varias pulsaciones
+ * (encadenar operaciones, corregir el operador), no en una pantalla estática.
+ */
+const calc = useCalculator({
+  decimals: toRef(props, 'decimals'),
+  allowNegative: toRef(props, 'allowNegative'),
 })
 
-const display = computed(() => {
-  if (current.value !== '') return current.value
-  if (justEvaluated.value && prev.value !== null) return String(prev.value)
-  return '0'
-})
+const expression = calc.expression
+const display = calc.display
+
+/** Con decimales la última tecla es la coma; si no, el cambio de signo. */
+const showDecimalKey = computed(() => props.decimals > 0)
+const showSignKey = computed(() => !showDecimalKey.value && props.allowNegative)
 
 watch(
   () => props.open,
   (isOpen) => {
-    if (isOpen) {
-      reset()
-      if (props.modelValue > 0) current.value = String(props.modelValue)
-    }
+    document.body.style.overflow = isOpen ? 'hidden' : ''
+    if (isOpen) calc.load(props.modelValue)
   },
 )
 
-function reset() {
-  current.value = ''
-  prev.value = null
-  op.value = null
-  justEvaluated.value = false
-}
-
-function press(digit: string) {
-  if (justEvaluated.value) reset()
-  if (current.value.length + digit.length > 8) return
-  if (current.value === '' && (digit === '0' || digit === '00')) return
-  if (current.value === '0' && digit !== '0' && digit !== '00') {
-    current.value = digit
-  } else {
-    current.value += digit
-  }
-}
-
-function pressOp(nextOp: string) {
-  const cur = parseFloat(current.value || '0')
-  justEvaluated.value = false
-  if (prev.value !== null && op.value !== null && current.value !== '') {
-    prev.value = evaluate(prev.value, cur, op.value)
-    op.value = nextOp
-  } else {
-    prev.value = cur
-    op.value = nextOp
-  }
-  current.value = ''
-}
-
-function pressEquals() {
-  if (prev.value === null || op.value === null) {
-    if (current.value !== '') justEvaluated.value = true
-    return
-  }
-  const cur = parseFloat(current.value || '0')
-  prev.value = evaluate(prev.value, cur, op.value)
-  op.value = null
-  current.value = ''
-  justEvaluated.value = true
-}
-
-function evaluate(a: number, b: number, operator: string): number {
-  switch (operator) {
-    case '+': return a + b
-    case '-': return a - b
-    case '*': return a * b
-    case '/': return b !== 0 ? Math.floor(a / b) : 0
-    default: return b
-  }
-}
-
-function backspace() {
-  if (justEvaluated.value) { reset(); return }
-  current.value = current.value.slice(0, -1)
-}
-
-function finalValue(): number {
-  if (prev.value !== null && op.value !== null && current.value !== '') {
-    return evaluate(prev.value, parseFloat(current.value), op.value)
-  }
-  if (justEvaluated.value && prev.value !== null) return prev.value
-  return parseFloat(current.value || '0')
-}
-
 function confirm() {
-  const val = Math.max(0, Math.floor(finalValue()))
+  const val = calc.value()
+
   emit('update:modelValue', val)
   emit('confirm', val)
   emit('close')
 }
 
-function cancel() { emit('close') }
+function cancel() {
+  emit('close')
+}
 
 function onKeydown(e: KeyboardEvent) {
   if (!props.open) return
-  if (e.key >= '0' && e.key <= '9') press(e.key)
-  else if (e.key === '+') pressOp('+')
-  else if (e.key === '-') pressOp('-')
-  else if (e.key === '*') pressOp('*')
-  else if (e.key === '/') pressOp('/')
-  else if (e.key === 'Enter' || e.key === '=') pressEquals()
-  else if (e.key === 'Backspace') backspace()
+
+  const operadores: Record<string, CalculatorOperator> = { '+': '+', '-': '-', '*': '*', '/': '/' }
+
+  if (e.key >= '0' && e.key <= '9') calc.press(e.key)
+  else if (e.key === '.' || e.key === ',') calc.pressDecimal()
+  else if (operadores[e.key]) calc.pressOp(operadores[e.key])
+  else if (e.key === 'Enter' || e.key === '=') calc.pressEquals()
+  else if (e.key === 'Backspace') calc.backspace()
   else if (e.key === 'Escape') cancel()
-  else if (e.key === 'c' || e.key === 'C') reset()
+  else if (e.key === 'c' || e.key === 'C') calc.reset()
 }
 
-watch(() => props.open, (v) => { document.body.style.overflow = v ? 'hidden' : '' })
-onMounted(() => { if (props.open) document.body.style.overflow = 'hidden'; window.addEventListener('keydown', onKeydown) })
-onUnmounted(() => { document.body.style.overflow = ''; window.removeEventListener('keydown', onKeydown) })
+onMounted(() => {
+  if (props.open) document.body.style.overflow = 'hidden'
+  window.addEventListener('keydown', onKeydown)
+})
+
+onUnmounted(() => {
+  document.body.style.overflow = ''
+  window.removeEventListener('keydown', onKeydown)
+})
 </script>
 
 <template>
@@ -162,10 +114,10 @@ onUnmounted(() => { document.body.style.overflow = ''; window.removeEventListene
 
           <!-- Grid 4×5 -->
           <div class="kp-grid">
-            <button type="button" class="kp-fn kp-clear" @click="reset">C</button>
-            <button type="button" class="kp-op" @click="pressOp('/')">÷</button>
-            <button type="button" class="kp-op" @click="pressOp('*')">×</button>
-            <button type="button" class="kp-fn kp-back" @click="backspace">
+            <button type="button" class="kp-fn kp-clear" @click="calc.reset()">C</button>
+            <button type="button" class="kp-op" @click="calc.pressOp('/')">÷</button>
+            <button type="button" class="kp-op" @click="calc.pressOp('*')">×</button>
+            <button type="button" class="kp-fn kp-back" @click="calc.backspace()">
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                 stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"/>
@@ -173,23 +125,31 @@ onUnmounted(() => { document.body.style.overflow = ''; window.removeEventListene
               </svg>
             </button>
 
-            <button type="button" class="kp-num" @click="press('7')">7</button>
-            <button type="button" class="kp-num" @click="press('8')">8</button>
-            <button type="button" class="kp-num" @click="press('9')">9</button>
-            <button type="button" class="kp-op" @click="pressOp('-')">−</button>
+            <button type="button" class="kp-num" @click="calc.press('7')">7</button>
+            <button type="button" class="kp-num" @click="calc.press('8')">8</button>
+            <button type="button" class="kp-num" @click="calc.press('9')">9</button>
+            <button type="button" class="kp-op" @click="calc.pressOp('-')">−</button>
 
-            <button type="button" class="kp-num" @click="press('4')">4</button>
-            <button type="button" class="kp-num" @click="press('5')">5</button>
-            <button type="button" class="kp-num" @click="press('6')">6</button>
-            <button type="button" class="kp-op" @click="pressOp('+')">+</button>
+            <button type="button" class="kp-num" @click="calc.press('4')">4</button>
+            <button type="button" class="kp-num" @click="calc.press('5')">5</button>
+            <button type="button" class="kp-num" @click="calc.press('6')">6</button>
+            <button type="button" class="kp-op" @click="calc.pressOp('+')">+</button>
 
-            <button type="button" class="kp-num" @click="press('1')">1</button>
-            <button type="button" class="kp-num" @click="press('2')">2</button>
-            <button type="button" class="kp-num" @click="press('3')">3</button>
-            <button type="button" class="kp-eq kp-eq-tall" :style="{ background: color }" @click="pressEquals">=</button>
+            <button type="button" class="kp-num" @click="calc.press('1')">1</button>
+            <button type="button" class="kp-num" @click="calc.press('2')">2</button>
+            <button type="button" class="kp-num" @click="calc.press('3')">3</button>
+            <button type="button" class="kp-eq kp-eq-tall" :style="{ background: color }" @click="calc.pressEquals()">=</button>
 
-            <button type="button" class="kp-num kp-wide" @click="press('00')">00</button>
-            <button type="button" class="kp-num" @click="press('0')">0</button>
+            <button type="button" class="kp-num" :class="{ 'kp-wide': !showDecimalKey && !showSignKey }"
+              @click="calc.press('0')">0</button>
+            <button type="button" class="kp-num" @click="calc.press('00')">00</button>
+
+            <!-- La coma y el cambio de signo comparten hueco: con decimales manda
+                 la coma, y si no hay ninguno de los dos el 0 ocupa dos columnas. -->
+            <button v-if="showDecimalKey" type="button" class="kp-num" aria-label="Coma decimal"
+              @click="calc.pressDecimal()">,</button>
+            <button v-else-if="showSignKey" type="button" class="kp-num" aria-label="Cambiar signo"
+              @click="calc.toggleSign()">±</button>
           </div>
         </div>
       </div>
