@@ -18,7 +18,9 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Mi Gallinero" />
-    <script>
+    {{-- El nonce lo genera SecurityHeaders y lo exige la CSP: sin él, este
+         script en línea queda bloqueado por `script-src 'self'`. --}}
+    <script nonce="{{ Illuminate\Support\Facades\Vite::cspNonce() }}">
       // El SW se sirve desde la raíz (copy-sw.php lo mueve ahí tras el build)
       // para tener scope '/'. Sólo en producción: en desarrollo el service
       // worker sirve módulos cacheados y provoca depuraciones fantasma.

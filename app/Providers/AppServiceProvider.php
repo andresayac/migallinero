@@ -7,6 +7,7 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -27,8 +28,30 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        $this->configureUrls();
         $this->configureRateLimiting();
         $this->configureModels();
+    }
+
+    /**
+     * Fuerza el esquema de las URLs generadas según APP_URL.
+     *
+     * Detrás de un CDN o un balanceador, el servidor de origen puede recibir la
+     * petición por HTTP aunque el usuario esté navegando en HTTPS: es lo que
+     * hace el modo SSL "Flexible" de Cloudflare. Laravel generaba entonces
+     * `http://` dentro de una página `https://`, y como para la política de
+     * seguridad de contenido eso cuenta como otro origen, el navegador
+     * bloqueaba TODOS los estilos y scripts de la app y la pantalla salía en
+     * blanco.
+     *
+     * Confiar sólo en `X-Forwarded-Proto` no basta, porque depende de que cada
+     * capa intermedia lo reenvíe. Si APP_URL dice https, se genera https.
+     */
+    protected function configureUrls(): void
+    {
+        if (str_starts_with((string) config('app.url'), 'https://')) {
+            URL::forceScheme('https');
+        }
     }
 
     /**
