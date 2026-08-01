@@ -2,7 +2,6 @@
 
 namespace App\Http\Middleware;
 
-use App\Models\Farm;
 use App\Tenancy\ActiveFarmResolver;
 use Closure;
 use Illuminate\Http\Request;
@@ -12,7 +11,12 @@ use Symfony\Component\HttpFoundation\Response;
 /**
  * Para APIs autenticadas con token Sanctum, resolvemos la granja activa desde
  * la cabecera `X-Farm-Id`. En el MVP cada usuario tiene una sola granja, así
- * que si no viene la cabecera usamos su primera granja.
+ * que si no viene la cabecera usamos su primera granja activa.
+ *
+ * IMPORTANTE: el trait `BelongsToFarm` sólo añade el `where farm_id` cuando
+ * hay una granja activa. Por eso este middleware corta con 401/403 en vez de
+ * dejar pasar sin contexto: un request sin granja resuelta consultaría SIN
+ * filtro y expondría datos de otras granjas.
  */
 class EnsureActiveFarm
 {
@@ -21,38 +25,42 @@ class EnsureActiveFarm
     public function handle(Request $request, Closure $next): Response
     {
         $user = $request->user();
+
         if (! $user) {
-            return $next($request);
+            return response()->json(['message' => 'No autenticado.'], 401);
         }
 
-        $farmId = $request->header('X-Farm-Id');
+        $header = $request->header('X-Farm-Id');
 
-        // Si no viene la cabecera, intentamos la única granja del usuario (MVP).
-        if (! $farmId) {
-            $farmId = $user->farms()->first()?->id;
+        // La cabecera debe ser un entero limpio: comparar un string arbitrario
+        // contra una columna numérica provoca coerciones silenciosas en MySQL
+        // ('1abc' se compara como 1).
+        $farmId = null;
+        if ($header !== null && $header !== '') {
+            if (! ctype_digit((string) $header)) {
+                return response()->json(['message' => 'Cabecera X-Farm-Id inválida.'], 422);
+            }
+            $farmId = (int) $header;
         }
 
-        if (! $farmId) {
-            return response()->json([
-                'message' => 'No tienes ninguna granja asignada.',
-            ], 403);
-        }
-
-        // Validamos que el usuario pertenezca a esa granja (y esté activo).
-        // Consulta directa a la tabla pivote para evitar errores con wherePivot dentro de whereHas.
-        $hasAccess = DB::table('farm_user')
-            ->where('farm_id', $farmId)
+        // Consulta directa a la tabla pivote: devuelve acceso y rol en un solo
+        // viaje, y evita los problemas de wherePivot dentro de whereHas.
+        $membership = DB::table('farm_user')
             ->where('user_id', $user->id)
             ->where('active', true)
-            ->exists();
+            ->when($farmId !== null, fn ($q) => $q->where('farm_id', $farmId))
+            ->orderBy('farm_id')
+            ->first(['farm_id', 'role']);
 
-        if (! $hasAccess) {
+        if (! $membership) {
             return response()->json([
-                'message' => 'No tienes acceso a esa granja.',
+                'message' => $farmId === null
+                    ? 'No tienes ninguna granja asignada.'
+                    : 'No tienes acceso a esa granja.',
             ], 403);
         }
 
-        $this->resolver->activate((int) $farmId);
+        $this->resolver->activate((int) $membership->farm_id, $membership->role);
 
         return $next($request);
     }

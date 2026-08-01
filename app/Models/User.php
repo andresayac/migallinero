@@ -34,6 +34,9 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            // El PIN autoriza saltarse el candado de período: se guarda
+            // hasheado igual que la contraseña, nunca en claro.
+            'pin' => 'hashed',
             'active' => 'boolean',
         ];
     }
