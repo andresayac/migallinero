@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { db } from '@/db/db'
+import { create as createRecord } from '@/db/repository'
 import { useFarmStore } from '@/stores/farm'
 import { useAuthStore } from '@/stores/auth'
 import { useSyncStore } from '@/stores/sync'
 import { useToast } from '@/composables/useToast'
-import { uuid, nowISO } from '@/utils/format'
+import { useSubmit } from '@/composables/useSubmit'
+import { usePeriodLock } from '@/composables/usePeriodLock'
+import { dayKey, startOfFarmDay, uuid, nowISO } from '@/utils/format'
 import type { Vaccine } from '@/types/domain'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
 import BigButton from '@/components/ui/BigButton.vue'
@@ -18,10 +20,17 @@ const farm = useFarmStore()
 const auth = useAuthStore()
 const sync = useSyncStore()
 const toast = useToast()
+const lock = usePeriodLock()
+const { busy, submit } = useSubmit()
+
+/** Hoy en la zona de la granja: tope del campo "aplicada el". */
+const todayKey = dayKey(startOfFarmDay())
 
 const name = ref('')
 const penId = ref('')
-const appliedAt = ref(new Date().toISOString().slice(0, 10))
+// Día en la zona de la granja, no el UTC de `toISOString()`: en Colombia
+// (UTC-5) por la tarde el valor por defecto salía con el día siguiente.
+const appliedAt = ref(dayKey(startOfFarmDay()))
 const nextAt = ref('')
 const qtyChickens = ref(0)
 const responsible = ref('')
@@ -30,45 +39,76 @@ const photoPath = ref('')
 const photoInput = ref<InstanceType<typeof PhotoInput> | null>(null)
 
 onMounted(() => {
-  penId.value = farm.activePenId || (farm.pens.length ? farm.pens[0].localUuid : '')
+  penId.value = farm.activePenId || (farm.activePens.length ? farm.activePens[0].localUuid : '')
 })
+
+/** Convierte un valor de `<input type="date">` en un ISO al mediodía local. */
+function dateToIso(value: string): string {
+  const [y, m, d] = value.split('-').map(Number)
+
+  // Mediodía en vez de medianoche: así el desplazamiento horario nunca mueve el
+  // registro al día anterior al guardarlo en UTC.
+  return new Date(y, (m ?? 1) - 1, d ?? 1, 12, 0, 0, 0).toISOString()
+}
 
 async function save() {
   if (!farm.farmId) return
+
   if (!name.value.trim()) {
     toast.error('Escribe el nombre de la vacuna')
+
     return
   }
-  const ts = nowISO()
-  const blobUrl = photoInput.value?.blob ? URL.createObjectURL(photoInput.value.blob) : (photoPath.value || undefined)
-  const v: Vaccine = {
-    localUuid: uuid(),
-    farmId: farm.farmId,
-    name: name.value.trim(),
-    penId: penId.value,
-    appliedAt: new Date(appliedAt.value).toISOString(),
-    nextAt: nextAt.value ? new Date(nextAt.value).toISOString() : undefined,
-    qtyChickens: qtyChickens.value,
-    responsible: responsible.value || undefined,
-    observation: observation.value || undefined,
-    photoPath: blobUrl,
-    pendingSync: true,
-    createdAt: ts,
-    updatedAt: ts,
-    createdBy: auth.user?.id ?? 'unknown',
+
+  if (!appliedAt.value) {
+    toast.error('Indica cuándo se aplicó')
+
+    return
   }
-  await db.vaccines.add(v)
-  await db.syncQueue.add({
-    farmId: farm.farmId,
-    entity: 'vaccine',
-    action: 'create',
-    localUuid: v.localUuid,
-    payload: v,
-    attempts: 0,
-    createdAt: ts,
+
+  const appliedIso = dateToIso(appliedAt.value)
+  const check = lock.check(appliedIso)
+
+  // El candado de período también aplica a las vacunas: antes esta pantalla no
+  // lo comprobaba y aceptaba cualquier fecha, incluso futura.
+  if (!check.ok) {
+    toast.error(check.reason ?? 'La fecha no está permitida')
+
+    return
+  }
+
+  const ts = nowISO()
+
+  const saved = await submit(async () => {
+    const photoReference = await photoInput.value?.persistPhoto(farm.farmId)
+
+    const vaccine: Vaccine = {
+      localUuid: uuid(),
+      farmId: farm.farmId,
+      name: name.value.trim(),
+      penId: penId.value,
+      appliedAt: appliedIso,
+      nextAt: nextAt.value ? dateToIso(nextAt.value) : undefined,
+      qtyChickens: qtyChickens.value,
+      responsible: responsible.value || undefined,
+      observation: observation.value || undefined,
+      photoPath: photoReference || photoPath.value || undefined,
+      pendingSync: true,
+      entryMode: 'auto',
+      createdAt: ts,
+      updatedAt: ts,
+      createdBy: auth.user?.id ?? 'unknown',
+    }
+
+    await createRecord('vaccine', vaccine)
+
+    await sync.refreshPending()
+    void sync.forceSync()
+
+    return true
   })
-  await sync.refreshPending()
-  sync.forceSync()
+
+  if (!saved) return
 
   toast.success('Vacuna registrada')
   router.replace({ name: 'home' })
@@ -94,12 +134,14 @@ async function save() {
     <div class="mb-4 grid grid-cols-2 gap-3">
       <label class="block">
         <span class="text-base font-semibold text-slate-600">Fecha aplicada</span>
-        <input v-model="appliedAt" type="date"
+        <!-- No se puede aplicar una vacuna en el futuro. -->
+        <input v-model="appliedAt" type="date" :max="todayKey"
           class="mt-1 w-full rounded-xl2 border-2 border-slate-200 px-4 py-3 text-lg focus:border-grass-500 focus:outline-none" />
       </label>
       <label class="block">
         <span class="text-base font-semibold text-slate-600">Próxima fecha</span>
-        <input v-model="nextAt" type="date"
+        <!-- La próxima dosis sí es a futuro: es un recordatorio. -->
+        <input v-model="nextAt" type="date" :min="appliedAt"
           class="mt-1 w-full rounded-xl2 border-2 border-slate-200 px-4 py-3 text-lg focus:border-grass-500 focus:outline-none" />
       </label>
     </div>
@@ -121,6 +163,12 @@ async function save() {
       class="mb-4"
     />
 
-    <BigButton label="Guardar vacuna" icon="syringe" size="block" @click="save" />
+    <BigButton
+      :label="busy ? 'Guardando…' : 'Guardar vacuna'"
+      icon="syringe"
+      size="block"
+      :disabled="busy"
+      @click="save"
+    />
   </ScreenShell>
 </template>

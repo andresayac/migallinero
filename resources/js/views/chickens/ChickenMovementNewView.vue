@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { db } from '@/db/db'
+import { create as createRecord } from '@/db/repository'
 import { useFarmStore } from '@/stores/farm'
 import { useAuthStore } from '@/stores/auth'
 import { useSyncStore } from '@/stores/sync'
 import { useToast } from '@/composables/useToast'
+import { useSubmit } from '@/composables/useSubmit'
 import { uuid, nowISO } from '@/utils/format'
 import type { ChickenMovement, ChickenMovementType } from '@/types/domain'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
@@ -18,6 +19,7 @@ const farm = useFarmStore()
 const auth = useAuthStore()
 const sync = useSyncStore()
 const toast = useToast()
+const { busy, submit } = useSubmit()
 
 const qty = ref(1)
 const type = ref<ChickenMovementType>('buy')
@@ -40,48 +42,68 @@ const currentType = computed(() => types.find((t) => t.value === type.value))
 const isAddition = computed(() => type.value === 'buy' || type.value === 'birth')
 
 onMounted(() => {
-  penId.value = farm.activePenId || (farm.pens.length ? farm.pens[0].localUuid : '')
+  penId.value = farm.activePenId || (farm.activePens.length ? farm.activePens[0].localUuid : '')
 })
 
 async function save() {
   if (!farm.farmId) return
+
   if (!penId.value) {
     toast.error('Selecciona el galpón')
+
     return
   }
+
   if (!reason.value.trim()) {
     toast.error('Escribe una breve descripción (de dónde, por qué)')
+
     return
   }
+
+  if (qty.value <= 0) {
+    toast.error('Indica la cantidad de gallinas')
+
+    return
+  }
+
+  if (dateSelector.value && !dateSelector.value.isValid) {
+    toast.error(dateSelector.value.validationMessage || 'La fecha no está permitida')
+
+    return
+  }
+
   const ts = nowISO()
   const entryMode = dateSelector.value?.entryMode ?? 'auto'
-  const m: ChickenMovement = {
+
+  const movement: ChickenMovement = {
     localUuid: uuid(),
     farmId: farm.farmId,
     penId: penId.value,
     type: type.value,
     qty: qty.value,
+    // Fecha operativa: la columna `movement_at` del backend es NOT NULL y antes
+    // no se enviaba, así que ningún movimiento llegaba a sincronizar.
+    movementAt: selectedAt.value,
     reason: reason.value.trim(),
     observation: observation.value || undefined,
     pendingSync: true,
     entryMode,
     manualReason: dateSelector.value?.manualReason,
-    createdAt: selectedAt.value,
+    createdAt: ts,
     updatedAt: ts,
     createdBy: auth.user?.id ?? 'unknown',
   }
-  await db.chickenMovements.add(m)
-  await db.syncQueue.add({
-    farmId: farm.farmId,
-    entity: 'chicken-movement',
-    action: 'create',
-    localUuid: m.localUuid,
-    payload: m,
-    attempts: 0,
-    createdAt: ts,
+
+  const saved = await submit(async () => {
+    await createRecord('chicken-movement', movement)
+
+    await sync.refreshPending()
+    void sync.forceSync()
+
+    return true
   })
-  await sync.refreshPending()
-  sync.forceSync()
+
+  if (!saved) return
 
   toast.success(`${currentType.value?.label} registrada`)
   router.replace({ name: 'home' })
@@ -125,7 +147,7 @@ async function save() {
     </label>
 
     <label class="mb-4 block">
-      <span class="text-base font-semibold text-slate-600">{{ isAddition ? '¿De dónde?' : '¿Por qué?' }}</span>
+      <span class="text-base font-semibold text-slate-600">{{ isAddition ? '¿De dónde?' : '¿Por qué?' }}<span class="text-alert-600"> *</span></span>
       <input v-model="reason" type="text"
         :placeholder="isAddition ? 'Ej: compra a granja vecina' : 'Ej: envejecimiento'"
         class="mt-1 w-full rounded-xl2 border-2 border-slate-200 px-4 py-3 text-lg focus:border-grass-500 focus:outline-none" />
@@ -137,6 +159,13 @@ async function save() {
         class="mt-1 w-full rounded-xl2 border-2 border-slate-200 px-4 py-3 text-lg focus:border-grass-500 focus:outline-none" />
     </label>
 
-    <BigButton label="Guardar" icon="save" :color="currentType?.color ?? 'grass'" size="block" @click="save" />
+    <BigButton
+      :label="busy ? 'Guardando…' : 'Guardar'"
+      icon="save"
+      :color="currentType?.color ?? 'grass'"
+      size="block"
+      :disabled="busy"
+      @click="save"
+    />
   </ScreenShell>
 </template>

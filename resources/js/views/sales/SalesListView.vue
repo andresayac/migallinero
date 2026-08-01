@@ -2,18 +2,24 @@
 import { ref, onMounted } from 'vue'
 import { db } from '@/db/db'
 import { useFarmStore } from '@/stores/farm'
+import { useAuthStore } from '@/stores/auth'
 import { useSyncStore } from '@/stores/sync'
 import { useToast } from '@/composables/useToast'
 import { useDialog } from '@/composables/useDialog'
-import { fmtCOP, fmtDate, nowISO } from '@/utils/format'
+import { useSubmit } from '@/composables/useSubmit'
+import { voidSale as voidSaleOperation } from '@/domain/sales'
+import { fmtMoney, fmtDate } from '@/utils/format'
+import { saleStatusClass, saleStatusLabel } from '@/utils/labels'
 import type { Sale, Customer } from '@/types/domain'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
 import BigButton from '@/components/ui/BigButton.vue'
 
 const farm = useFarmStore()
+const auth = useAuthStore()
 const sync = useSyncStore()
 const toast = useToast()
 const dialog = useDialog()
+const { busy, submit } = useSubmit()
 
 const sales = ref<Sale[]>([])
 const customers = ref<Customer[]>([])
@@ -27,57 +33,56 @@ async function load() {
 }
 onMounted(load)
 
-const statusLabel: Record<string, { text: string; cls: string }> = {
-  paid: { text: 'Pagada', cls: 'bg-grass-100 text-grass-700' },
-  partial: { text: 'Parcial', cls: 'bg-brand-100 text-brand-700' },
-  pending: { text: 'Pendiente', cls: 'bg-alert-100 text-alert-700' },
-  void: { text: 'Anulada', cls: 'bg-slate-200 text-slate-500 line-through' },
-}
-
 function customerName(id: string): string {
   return customers.value.find((c) => c.localUuid === id)?.name ?? '—'
 }
 
 /**
- * Anula una venta: cambia estado a `void`, revierte el saldo del cliente,
- * registra snapshot en auditBefore y deja registro para sync.
+ * Anula una venta.
+ *
+ * La operación completa (marcar `void`, anular los pagos asociados y recalcular
+ * el saldo del cliente) vive en `domain/sales.ts`. Antes se hacía aquí a mano y
+ * dejaba los pagos intactos, así que una venta anulada seguía contando como
+ * ingreso en los reportes; y nada de lo que cambiaba se encolaba para subir.
+ *
+ * Sólo el admin puede anular: es la misma regla que aplica el backend.
  */
 async function voidSale(sale: Sale) {
   if (sale.status === 'void') {
     toast.info('Esta venta ya está anulada')
+
     return
   }
-  const ok = await dialog.confirm({
-    title: 'Anular venta',
-    message: `¿Seguro que quieres anular la venta de ${fmtCOP(sale.total)} a ${customerName(sale.customerId)}? Los huevos volverán al inventario y se registrará el cambio en auditoría.`,
-  })
-  if (!ok) return
 
-  const ts = nowISO()
-  // JSON plano para que IndexedDB pueda clonarlo (las ventas tienen arrays de líneas).
-  const before = JSON.parse(JSON.stringify(sale)) as unknown
-  await db.sales.update(sale.localUuid, {
-    status: 'void',
-    balance: 0,
-    auditBefore: before,
-    updatedAt: ts,
-    pendingSync: true,
-  })
+  if (!auth.isAdmin) {
+    toast.error('Sólo el administrador puede anular ventas')
 
-  // Revertir saldo del cliente.
-  const cust = customers.value.find((c) => c.localUuid === sale.customerId)
-  if (cust) {
-    await db.customers.update(cust.localUuid, {
-      balance: Math.max(0, cust.balance - sale.balance),
-      updatedAt: ts,
-      pendingSync: true,
-    })
+    return
   }
 
-  await sync.refreshPending()
-  sync.forceSync()
-  await load()
-  toast.success('Venta anulada. Los huevos vuelven al inventario.')
+  const ok = await dialog.confirm({
+    title: 'Anular venta',
+    message: `¿Seguro que quieres anular la venta de ${fmtMoney(sale.total)} a ${customerName(sale.customerId)}? Los huevos vuelven al inventario, los pagos se anulan y queda registrado en la auditoría.`,
+    confirmLabel: 'Sí, anular',
+    danger: true,
+  })
+
+  if (!ok) return
+
+  const done = await submit(
+    async () => {
+      await voidSaleOperation(sale)
+
+      await sync.refreshPending()
+      void sync.forceSync()
+      await load()
+
+      return true
+    },
+    { errorMessage: 'No se pudo anular la venta' },
+  )
+
+  if (done) toast.success('Venta anulada. Los huevos vuelven al inventario.')
 }
 </script>
 
@@ -95,22 +100,28 @@ async function voidSale(sale: Sale) {
             <p class="text-lg font-bold text-slate-800">{{ customerName(s.customerId) }}</p>
             <p class="text-sm text-slate-500">{{ fmtDate(s.soldAt) }}</p>
           </div>
-          <span class="rounded-full px-2 py-1 text-xs font-bold" :class="statusLabel[s.status]?.cls">
-            {{ statusLabel[s.status]?.text ?? s.status }}
+          <span class="rounded-full px-2 py-1 text-xs font-bold" :class="saleStatusClass(s.status)">
+            {{ saleStatusLabel(s.status) }}
           </span>
         </div>
         <div class="mt-2 flex items-center justify-between">
           <div class="text-sm text-slate-600">
-            <span class="font-bold">{{ fmtCOP(s.total) }}</span>
-            <span v-if="s.discount > 0" class="ml-1 text-slate-400">(-{{ fmtCOP(s.discount) }})</span>
+            <span class="font-bold">{{ fmtMoney(s.total) }}</span>
+            <span v-if="s.discount > 0" class="ml-1 text-slate-400">(-{{ fmtMoney(s.discount) }})</span>
           </div>
           <div v-if="s.balance > 0 && s.status !== 'void'" class="text-sm font-bold text-alert-600">
-            Debe {{ fmtCOP(s.balance) }}
+            Debe {{ fmtMoney(s.balance) }}
           </div>
         </div>
-        <div v-if="s.status !== 'void'" class="mt-2">
-          <BigButton label="Anular venta" icon="close" color="alert" size="block"
-            @click="voidSale(s)" />
+        <div v-if="s.status !== 'void' && auth.isAdmin" class="mt-2">
+          <BigButton
+            :label="busy ? 'Anulando…' : 'Anular venta'"
+            icon="close"
+            color="alert"
+            size="block"
+            :disabled="busy"
+            @click="voidSale(s)"
+          />
         </div>
       </div>
     </div>

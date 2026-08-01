@@ -6,8 +6,10 @@ import { useAuthStore } from '@/stores/auth'
 import { useSyncStore } from '@/stores/sync'
 import { useToast } from '@/composables/useToast'
 import { useDialog } from '@/composables/useDialog'
-import { fmtCOP, daysSince, uuid, nowISO, toCOP } from '@/utils/format'
-import type { Customer, Sale, Payment } from '@/types/domain'
+import { useSubmit } from '@/composables/useSubmit'
+import { registerPayment } from '@/domain/sales'
+import { fmtMoney, daysSince, toMoney } from '@/utils/format'
+import type { Customer, Sale } from '@/types/domain'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
 import BigButton from '@/components/ui/BigButton.vue'
 
@@ -16,6 +18,7 @@ const auth = useAuthStore()
 const sync = useSyncStore()
 const toast = useToast()
 const dialog = useDialog()
+const { busy, submit } = useSubmit()
 
 const customers = ref<Customer[]>([])
 const sales = ref<Sale[]>([])
@@ -27,138 +30,101 @@ interface DebtRow {
   days: number
 }
 
-const rows = computed<DebtRow[]>(() => {
-  return customers.value
-    .map((c) => {
+/**
+ * Deuda por cliente con el mismo criterio que el resto de la app: venta no
+ * anulada con saldo pendiente, en vez de `status IN (pending, partial)`.
+ */
+const rows = computed<DebtRow[]>(() =>
+  customers.value
+    .map((customer) => {
       const custSales = sales.value
-        .filter((s) => s.customerId === c.localUuid && (s.status === 'pending' || s.status === 'partial'))
+        .filter((s) => s.customerId === customer.localUuid && s.status !== 'void' && s.balance > 0)
         .sort((a, b) => a.soldAt.localeCompare(b.soldAt))
-      const debt = custSales.reduce((s, x) => s + x.balance, 0)
+
       const oldest = custSales[0]
+
       return {
-        customer: c,
-        debt,
+        customer,
+        debt: custSales.reduce((sum, s) => sum + s.balance, 0),
         oldestSale: oldest,
         days: oldest ? daysSince(oldest.soldAt) : 0,
       }
     })
     .filter((r) => r.debt > 0)
-    .sort((a, b) => b.days - a.days)
-})
+    .sort((a, b) => b.days - a.days),
+)
 
-const totalDue = computed(() => rows.value.reduce((s, r) => s + r.debt, 0))
+const totalDue = computed(() => rows.value.reduce((sum, r) => sum + r.debt, 0))
 
 async function load() {
   if (!farm.farmId) return
+
   ;[customers.value, sales.value] = await Promise.all([
     db.customers.where('farmId').equals(farm.farmId).toArray(),
     db.sales.where('farmId').equals(farm.farmId).toArray(),
   ])
 }
+
 onMounted(load)
 
 /**
- * Abre diálogo para registrar un abono (completo o parcial) sobre la deuda
- * del cliente. Aplica proporcionalmente a las ventas pendientes, empezando
- * por la más antigua.
+ * Registra un abono (total o parcial) sobre la deuda del cliente.
+ *
+ * La lógica vive en `domain/sales.ts`: la venta modificada, el pago y el saldo
+ * del cliente se guardan en una sola transacción y los tres se encolan. Antes
+ * sólo se encolaba el pago, así que en el servidor el saldo de la venta se
+ * quedaba congelado en el valor original para siempre.
  */
-async function registerPayment(row: DebtRow) {
-  const amountStr = await dialog.prompt({
+async function onRegisterPayment(row: DebtRow) {
+  const answer = await dialog.prompt({
     title: `Abono de ${row.customer.name}`,
-    label: `¿Cuánto te pagó? Deuda total: ${fmtCOP(row.debt)}`,
+    label: `¿Cuánto te pagó? Deuda total: ${fmtMoney(row.debt)}`,
     defaultValue: String(row.debt),
+    inputMode: 'numeric',
   })
-  const amount = Number(amountStr)
+
+  // null = canceló. Una cadena vacía sí llega aquí y se valida como monto.
+  if (answer === null) return
+
+  const amount = toMoney(Number(answer.replace(/[^\d.,-]/g, '').replace(',', '.')))
+
   if (!Number.isFinite(amount) || amount <= 0) {
-    if (amountStr !== null) toast.error('Escribe un monto válido')
+    toast.error('Escribe un monto válido')
+
     return
   }
+
   if (amount > row.debt) {
-    toast.error(`No puede pagar más de lo que debe (${fmtCOP(row.debt)})`)
+    toast.error(`No puede pagar más de lo que debe (${fmtMoney(row.debt)})`)
+
     return
   }
 
-  try {
-    const ts = nowISO()
-    let remaining = toCOP(amount)
+  const applied = await submit(
+    async () => {
+      const result = await registerPayment({
+        farmId: farm.farmId,
+        createdBy: auth.user?.id ?? 'unknown',
+        customerId: row.customer.localUuid,
+        amount,
+      })
 
-  // Ventas pendientes del cliente, de la más antigua a la más nueva.
-  const custSales = sales.value
-    .filter((s) => s.customerId === row.customer.localUuid && (s.status === 'pending' || s.status === 'partial'))
-    .sort((a, b) => a.soldAt.localeCompare(b.soldAt))
+      await sync.refreshPending()
+      void sync.forceSync()
+      await load()
 
-  for (const sale of custSales) {
-    if (remaining <= 0) break
-    const apply = Math.min(remaining, sale.balance)
-    if (apply <= 0) continue
+      return result
+    },
+    { errorMessage: 'No se pudo registrar el pago' },
+  )
 
-    const newPaid = toCOP(sale.paid + apply)
-    const newBalance = toCOP(sale.balance - apply)
-    const status = newBalance <= 0 ? 'paid' : 'partial'
-
-    // Guardamos snapshot para auditoría antes de modificar.
-    // JSON.parse(JSON.stringify(...)) para asegurar estructura clonable por
-    // IndexedDB (sin referencias circulares ni tipos no estructurados).
-    const before = JSON.parse(JSON.stringify(sale)) as unknown
-    await db.sales.update(sale.localUuid, {
-      paid: newPaid,
-      balance: newBalance,
-      status,
-      auditBefore: before,
-      updatedAt: ts,
-      pendingSync: true,
-    })
-
-    // Registramos el pago individual.
-    const payment: Payment = {
-      localUuid: uuid(),
-      farmId: farm.farmId,
-      saleId: sale.localUuid,
-      customerId: row.customer.localUuid,
-      amount: apply,
-      method: 'efectivo',
-      paidAt: ts,
-      pendingSync: true,
-      entryMode: 'auto',
-      createdAt: ts,
-      updatedAt: ts,
-      createdBy: auth.user?.id ?? 'unknown',
-    }
-    await db.payments.add(payment)
-    await db.syncQueue.add({
-      farmId: farm.farmId,
-      entity: 'payment',
-      action: 'create',
-      localUuid: payment.localUuid,
-      payload: payment,
-      attempts: 0,
-      createdAt: ts,
-    })
-
-    remaining = toCOP(remaining - apply)
-  }
-
-  // Actualizamos el saldo del cliente.
-  const newCustomerBalance = toCOP(row.customer.balance - amount)
-  await db.customers.update(row.customer.localUuid, {
-    balance: newCustomerBalance,
-    updatedAt: ts,
-    pendingSync: true,
-  })
-
-  await sync.refreshPending()
-  sync.forceSync()
-  await load()
+  if (applied === undefined) return
 
   toast.success(
-    amount >= row.debt
-      ? `Pago completo registrado (${fmtCOP(amount)})`
-      : `Abono de ${fmtCOP(amount)} registrado`,
+    applied >= row.debt
+      ? `Pago completo registrado (${fmtMoney(applied)})`
+      : `Abono de ${fmtMoney(applied)} registrado`,
   )
-  } catch (e) {
-    console.error('[registerPayment]', e)
-    toast.error('No se pudo registrar el pago: ' + (e as Error).message)
-  }
 }
 </script>
 
@@ -167,7 +133,7 @@ async function registerPayment(row: DebtRow) {
     <div class="card mb-4 text-center" :class="totalDue > 0 ? 'bg-alert-50' : 'bg-grass-50'">
       <p class="text-base font-semibold text-slate-500">Total por cobrar</p>
       <p class="num-big" :class="totalDue > 0 ? 'text-alert-600' : 'text-grass-600'">
-        {{ fmtCOP(totalDue) }}
+        {{ fmtMoney(totalDue) }}
       </p>
     </div>
 
@@ -179,27 +145,35 @@ async function registerPayment(row: DebtRow) {
       <div v-for="r in rows" :key="r.customer.localUuid" class="card">
         <div class="flex items-center justify-between">
           <p class="text-xl font-extrabold text-slate-800">{{ r.customer.name }}</p>
-          <p class="text-2xl font-extrabold text-alert-600">{{ fmtCOP(r.debt) }}</p>
+          <p class="text-2xl font-extrabold text-alert-600">{{ fmtMoney(r.debt) }}</p>
         </div>
         <p class="text-sm text-slate-500">
           Compró hace {{ r.days }} día{{ r.days === 1 ? '' : 's' }}
-          <span v-if="r.days > 7" class="font-bold text-alert-600"> · atrasado ⚠</span>
+          <span v-if="r.days > farm.periodLockDays" class="font-bold text-alert-600">
+            · atrasado ⚠</span
+          >
         </p>
         <div class="mt-2 flex gap-2">
           <BigButton
-            label="Registrar pago"
+            :label="busy ? 'Guardando…' : 'Registrar pago'"
             icon="money"
             color="amber"
             class="flex-1"
-            @click="registerPayment(r)"
+            :disabled="busy"
+            @click="onRegisterPayment(r)"
           />
         </div>
       </div>
     </div>
 
     <div class="mt-6">
-      <BigButton label="Ver todos los clientes" icon="people" color="ghost" size="block"
-        @click="$router.push('/customers')" />
+      <BigButton
+        label="Ver todos los clientes"
+        icon="people"
+        color="ghost"
+        size="block"
+        @click="$router.push('/customers')"
+      />
     </div>
   </ScreenShell>
 </template>

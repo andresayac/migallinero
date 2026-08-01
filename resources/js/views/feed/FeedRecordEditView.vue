@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { db } from '@/db/db'
+import { create as createRecord } from '@/db/repository'
 import { useFarmStore } from '@/stores/farm'
 import { useAuthStore } from '@/stores/auth'
 import { useSyncStore } from '@/stores/sync'
 import { useToast } from '@/composables/useToast'
-import { uuid, nowISO } from '@/utils/format'
+import { useSubmit } from '@/composables/useSubmit'
+import { fmtMoney, fmtNumber, toMoney, uuid, nowISO } from '@/utils/format'
 import type { FeedRecord, FeedRecordLine } from '@/types/domain'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
 import BigButton from '@/components/ui/BigButton.vue'
+import DateSelector from '@/components/ui/DateSelector.vue'
 import NumericKeypad from '@/components/ui/NumericKeypad.vue'
 
 const router = useRouter()
@@ -17,42 +19,53 @@ const farm = useFarmStore()
 const auth = useAuthStore()
 const sync = useSyncStore()
 const toast = useToast()
+const { busy, submit } = useSubmit()
 
 const selectedPenId = ref<string>('')
 const observation = ref('')
 const shift = ref<'morning' | 'afternoon'>('morning')
 
-/** Cantidades (kg) por tipo de alimento. */
+/** Cantidades (kg) por tipo de alimento. Admiten decimales. */
 const qtyByFeed = ref<Record<string, number>>(
-  Object.fromEntries(farm.feedTypes.map((f) => [f.localUuid, 0])),
+  Object.fromEntries(farm.activeFeedTypes.map((f) => [f.localUuid, 0])),
 )
-/** Costo unitario (COP por kg) por tipo de alimento. */
+/** Costo unitario por unidad de alimento. */
 const costByFeed = ref<Record<string, number>>(
-  Object.fromEntries(farm.feedTypes.map((f) => [f.localUuid, 0])),
+  Object.fromEntries(farm.activeFeedTypes.map((f) => [f.localUuid, 0])),
 )
 
 const selectedAt = ref<string>(nowISO())
+const dateSelector = ref<InstanceType<typeof DateSelector> | null>(null)
 
 const totalQty = computed(() =>
-  farm.feedTypes.reduce((sum, f) => sum + (qtyByFeed.value[f.localUuid] ?? 0), 0),
+  round2(farm.activeFeedTypes.reduce((sum, f) => sum + (qtyByFeed.value[f.localUuid] ?? 0), 0)),
 )
 const totalCost = computed(() =>
-  farm.feedTypes.reduce((sum, f) => {
-    const qty = qtyByFeed.value[f.localUuid] ?? 0
-    const cost = costByFeed.value[f.localUuid] ?? 0
-    return sum + qty * cost
-  }, 0),
+  toMoney(
+    farm.activeFeedTypes.reduce((sum, f) => {
+      const qty = qtyByFeed.value[f.localUuid] ?? 0
+      const cost = costByFeed.value[f.localUuid] ?? 0
+
+      return sum + qty * cost
+    }, 0),
+  ),
 )
 
+/** Los kilos se guardan con dos decimales, igual que la columna del backend. */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
 onMounted(() => {
-  selectedPenId.value = farm.activePenId || (farm.pens.length ? farm.pens[0].localUuid : '')
-  for (const f of farm.feedTypes) {
+  selectedPenId.value = farm.activePenId || (farm.activePens.length ? farm.activePens[0].localUuid : '')
+
+  for (const f of farm.activeFeedTypes) {
     if (qtyByFeed.value[f.localUuid] === undefined) qtyByFeed.value[f.localUuid] = 0
     if (costByFeed.value[f.localUuid] === undefined) costByFeed.value[f.localUuid] = 0
   }
-  // Detectar turno automáticamente según la hora.
-  const hour = new Date().getHours()
-  shift.value = hour < 12 ? 'morning' : 'afternoon'
+
+  // Turno automático según la hora del dispositivo.
+  shift.value = new Date().getHours() < 12 ? 'morning' : 'afternoon'
 })
 
 // ── Keypad state ──────────────────────────────────────────────────
@@ -90,31 +103,43 @@ const keypadValue = computed(() => {
 
 async function save() {
   if (!farm.farmId) return
+
   if (!selectedPenId.value) {
     toast.error('Selecciona el galpón')
+
     return
   }
+
   if (totalQty.value === 0) {
     toast.error('Agrega al menos un tipo de alimento')
+
+    return
+  }
+
+  if (dateSelector.value && !dateSelector.value.isValid) {
+    toast.error(dateSelector.value.validationMessage || 'La fecha no está permitida')
+
     return
   }
 
   const ts = nowISO()
-  const lineRecords: FeedRecordLine[] = farm.feedTypes
+
+  const lineRecords: FeedRecordLine[] = farm.activeFeedTypes
     .map((f) => {
-      const qty = qtyByFeed.value[f.localUuid] ?? 0
-      const unitCost = costByFeed.value[f.localUuid] ?? 0
+      const qty = round2(qtyByFeed.value[f.localUuid] ?? 0)
+      const unitCost = toMoney(costByFeed.value[f.localUuid] ?? 0)
+
       return {
         feedTypeId: f.localUuid,
         feedTypeName: f.name,
         qty,
         unitCost,
-        subtotal: qty * unitCost,
+        subtotal: toMoney(qty * unitCost),
       }
     })
     .filter((l) => l.qty > 0)
 
-  const collection: FeedRecord = {
+  const record: FeedRecord = {
     type: 'feed-record',
     localUuid: uuid(),
     farmId: farm.farmId,
@@ -126,24 +151,23 @@ async function save() {
     totalCost: totalCost.value,
     lines: lineRecords,
     pendingSync: true,
-    entryMode: 'auto',
+    entryMode: dateSelector.value?.entryMode ?? 'auto',
+    manualReason: dateSelector.value?.manualReason,
     createdAt: ts,
     updatedAt: ts,
     createdBy: auth.user?.id ?? 'unknown',
   }
 
-  await db.feedRecords.add(collection)
-  await db.syncQueue.add({
-    farmId: farm.farmId,
-    entity: 'feed-record',
-    action: 'create',
-    localUuid: collection.localUuid,
-    payload: collection,
-    attempts: 0,
-    createdAt: ts,
+  const saved = await submit(async () => {
+    await createRecord('feed-record', record)
+
+    await sync.refreshPending()
+    void sync.forceSync()
+
+    return true
   })
-  await sync.refreshPending()
-  sync.forceSync()
+
+  if (!saved) return
 
   toast.success('Registro de alimento guardado')
   router.replace({ name: 'home' })
@@ -166,6 +190,15 @@ async function save() {
         <option v-for="p in farm.activePens" :key="p.localUuid" :value="p.localUuid">{{ p.name }}</option>
       </select>
     </div>
+
+    <!-- Fecha del consumo: antes estaba fija a "ahora" y no se podía cambiar -->
+    <DateSelector
+      ref="dateSelector"
+      v-model="selectedAt"
+      :can-override="auth.isAdmin"
+      label="¿Cuándo se dio el alimento?"
+      class="mb-3"
+    />
 
     <!-- Turno -->
     <div class="mb-3 flex gap-2">
@@ -190,7 +223,7 @@ async function save() {
     <!-- Tarjetas de tipo de alimento -->
     <div class="flex flex-col gap-3">
       <div
-        v-for="ft in farm.feedTypes.filter((f) => f.active)"
+        v-for="ft in farm.activeFeedTypes"
         :key="ft.localUuid"
         class="card"
       >
@@ -210,7 +243,7 @@ async function save() {
             class="text-2xl font-extrabold tabular-nums"
             :class="qtyByFeed[ft.localUuid] > 0 ? 'text-slate-800' : 'text-slate-300'"
           >
-            {{ qtyByFeed[ft.localUuid] > 0 ? qtyByFeed[ft.localUuid] : '—' }}
+            {{ qtyByFeed[ft.localUuid] > 0 ? fmtNumber(qtyByFeed[ft.localUuid], 2) : '—' }}
           </span>
         </button>
 
@@ -220,12 +253,12 @@ async function save() {
           class="mt-2 flex w-full items-center justify-between rounded-xl2 border-2 border-slate-200 px-4 py-3 active:border-grass-500"
           @click="openCostKeypad(ft.localUuid, ft.name)"
         >
-          <span class="text-base font-semibold text-slate-500">Costo / {{ ft.unit }} (COP)</span>
+          <span class="text-base font-semibold text-slate-500">Costo / {{ ft.unit }}</span>
           <span
             class="text-2xl font-extrabold tabular-nums"
             :class="costByFeed[ft.localUuid] > 0 ? 'text-slate-800' : 'text-slate-300'"
           >
-            {{ costByFeed[ft.localUuid] > 0 ? '$ ' + costByFeed[ft.localUuid].toLocaleString('es-CO') : '—' }}
+            {{ costByFeed[ft.localUuid] > 0 ? fmtMoney(costByFeed[ft.localUuid]) : '—' }}
           </span>
         </button>
 
@@ -234,7 +267,7 @@ async function save() {
           v-if="qtyByFeed[ft.localUuid] > 0 && costByFeed[ft.localUuid] > 0"
           class="mt-2 text-right text-sm font-bold text-grass-600"
         >
-          Subtotal: $ {{ (qtyByFeed[ft.localUuid] * costByFeed[ft.localUuid]).toLocaleString('es-CO') }}
+          Subtotal: {{ fmtMoney(qtyByFeed[ft.localUuid] * costByFeed[ft.localUuid]) }}
         </p>
       </div>
     </div>
@@ -254,23 +287,32 @@ async function save() {
     <div class="card mt-4 bg-grass-50">
       <div class="flex items-center justify-between">
         <span class="text-lg font-bold text-slate-600">Total alimento</span>
-        <span class="text-mega font-extrabold text-grass-600">{{ totalQty }} <span class="text-lg">kg</span></span>
+        <span class="text-mega font-extrabold text-grass-600">{{ fmtNumber(totalQty, 2) }}</span>
       </div>
       <div v-if="totalCost > 0" class="mt-2 flex items-center justify-between border-t border-grass-200 pt-2">
         <span class="text-lg font-bold text-slate-600">Total costo</span>
-        <span class="text-3xl font-extrabold text-grass-700">$ {{ totalCost.toLocaleString('es-CO') }}</span>
+        <span class="text-3xl font-extrabold text-grass-700">{{ fmtMoney(totalCost) }}</span>
       </div>
     </div>
 
     <div class="mt-6">
-      <BigButton label="Guardar registro" icon="save" size="block" @click="save" />
+      <BigButton
+        :label="busy ? 'Guardando…' : 'Guardar registro'"
+        icon="save"
+        size="block"
+        :disabled="busy"
+        @click="save"
+      />
     </div>
 
-    <!-- Keypad (reutilizado para cantidad y costo) -->
+    <!-- Keypad (reutilizado para cantidad y costo).
+         La cantidad admite 2 decimales, igual que la columna `qty` del backend:
+         antes el teclado forzaba enteros y no se podían registrar 12,5 kg. -->
     <NumericKeypad
       :open="keypadOpen"
       :model-value="keypadValue"
-      :title="keypadField === 'qty' ? `${keypadFeedName} — Cantidad` : `${keypadFeedName} — Costo/kg`"
+      :decimals="keypadField === 'qty' ? 2 : 0"
+      :title="keypadField === 'qty' ? `${keypadFeedName} — Cantidad` : `${keypadFeedName} — Costo por unidad`"
       :color="keypadField === 'qty' ? '#16a34a' : '#1d4ed8'"
       @update:model-value="onKeypadConfirm"
       @close="keypadOpen = false"

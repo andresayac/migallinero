@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { db } from '@/db/db'
+import { create as createRecord } from '@/db/repository'
 import { useFarmStore } from '@/stores/farm'
 import { useAuthStore } from '@/stores/auth'
 import { useSyncStore } from '@/stores/sync'
 import { useToast } from '@/composables/useToast'
-import { uuid, nowISO } from '@/utils/format'
+import { useSubmit } from '@/composables/useSubmit'
+import { uuid, nowISO, fmtNumber } from '@/utils/format'
 import type { EggCollection, EggCollectionLine } from '@/types/domain'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
 import BigButton from '@/components/ui/BigButton.vue'
@@ -18,12 +19,13 @@ const farm = useFarmStore()
 const auth = useAuthStore()
 const sync = useSyncStore()
 const toast = useToast()
+const { busy, submit } = useSubmit()
 
 const selectedPenId = ref<string>('')
 const observation = ref('')
 /** cantidades por id de categoría (inicializadas en 0 para evitar warnings) */
 const qtyByCat = ref<Record<string, number>>(
-  Object.fromEntries(farm.categories.map((c) => [c.localUuid, 0])),
+  Object.fromEntries(farm.activeCategories.map((c) => [c.localUuid, 0])),
 )
 
 /** Fecha/hora seleccionada (comienza con la actual del dispositivo). */
@@ -37,14 +39,21 @@ const keypadCatName = ref('')
 const keypadCatColor = ref('#16a34a')
 
 const total = computed(() =>
-  farm.categories.reduce((sum, c) => sum + (qtyByCat.value[c.localUuid] ?? 0), 0),
+  farm.activeCategories.reduce((sum, c) => sum + (qtyByCat.value[c.localUuid] ?? 0), 0),
+)
+
+/** Huevos vendibles del total (los rotos se registran pero no se venden). */
+const sellableTotal = computed(() =>
+  farm.activeCategories
+    .filter((c) => !c.isBroken)
+    .reduce((sum, c) => sum + (qtyByCat.value[c.localUuid] ?? 0), 0),
 )
 
 onMounted(() => {
-  // Precarga el galpón activo del Home si existe; si no, el primero.
-  selectedPenId.value = farm.activePenId || (farm.pens.length ? farm.pens[0].localUuid : '')
+  // Precarga el galpón activo del Home si existe; si no, el primero activo.
+  selectedPenId.value = farm.activePenId || (farm.activePens.length ? farm.activePens[0].localUuid : '')
   // Re-asegura que cualquier categoría nueva esté en cero.
-  for (const c of farm.categories) {
+  for (const c of farm.activeCategories) {
     if (qtyByCat.value[c.localUuid] === undefined) qtyByCat.value[c.localUuid] = 0
   }
 })
@@ -64,17 +73,29 @@ function onKeypadConfirm(val: number) {
 
 async function save() {
   if (!farm.farmId) return
+
   if (!selectedPenId.value) {
     toast.error('Selecciona el galpón')
+
     return
   }
+
   if (total.value === 0) {
     toast.error('Agrega al menos un huevo')
+
+    return
+  }
+
+  // El candado de período se comprueba ANTES de guardar. Ninguna vista lo hacía:
+  // si el selector no llegaba a corregir la fecha, se guardaba una inválida.
+  if (dateSelector.value && !dateSelector.value.isValid) {
+    toast.error(dateSelector.value.validationMessage || 'La fecha no está permitida')
+
     return
   }
 
   const ts = nowISO()
-  const lineRecords: EggCollectionLine[] = farm.categories
+  const lineRecords: EggCollectionLine[] = farm.activeCategories
     .map((c) => ({ categoryId: c.localUuid, qty: qtyByCat.value[c.localUuid] ?? 0 }))
     .filter((l) => l.qty > 0)
 
@@ -98,24 +119,21 @@ async function save() {
     createdBy: auth.user?.id ?? 'unknown',
   }
 
-  await db.eggCollections.add(collection)
-  await db.syncQueue.add({
-    farmId: farm.farmId,
-    entity: 'egg-collection',
-    action: 'create',
-    localUuid: collection.localUuid,
-    payload: collection,
-    attempts: 0,
-    createdAt: ts,
+  const saved = await submit(async () => {
+    await createRecord('egg-collection', collection)
+
+    await sync.refreshPending()
+    void sync.forceSync()
+
+    return true
   })
-  await sync.refreshPending()
-  sync.forceSync()
+
+  if (!saved) return
 
   toast.success(
-    entryMode === 'manual'
-      ? 'Tanda guardada (fecha manual)'
-      : 'Tanda guardada correctamente',
+    entryMode === 'manual' ? 'Tanda guardada (fecha manual)' : 'Tanda guardada correctamente',
   )
+
   router.replace({ name: 'home' })
 }
 </script>
@@ -144,7 +162,7 @@ async function save() {
     <!-- Tarjetas de categoría: toca para abrir el teclado numérico -->
     <div class="flex flex-col gap-3">
       <button
-        v-for="cat in farm.categories"
+        v-for="cat in farm.activeCategories"
         :key="cat.localUuid"
         type="button"
         class="card cat-card"
@@ -185,13 +203,28 @@ async function save() {
     </label>
 
     <!-- TOTAL de la tanda en grande -->
-    <div class="card mt-4 flex items-center justify-between bg-grass-50">
-      <span class="text-lg font-bold text-slate-600">Total de la tanda</span>
-      <span class="text-mega font-extrabold text-grass-600">{{ total }}</span>
+    <div class="card mt-4 bg-grass-50">
+      <div class="flex items-center justify-between">
+        <span class="text-lg font-bold text-slate-600">Total de la tanda</span>
+        <span class="text-mega font-extrabold text-grass-600">{{ fmtNumber(total) }}</span>
+      </div>
+      <div
+        v-if="sellableTotal !== total"
+        class="mt-1 flex items-center justify-between border-t border-grass-200 pt-1 text-sm"
+      >
+        <span class="font-semibold text-slate-500">Para vender</span>
+        <span class="font-bold text-slate-700">{{ fmtNumber(sellableTotal) }}</span>
+      </div>
     </div>
 
     <div class="mt-6">
-      <BigButton label="Guardar tanda" icon="save" size="block" @click="save" />
+      <BigButton
+        :label="busy ? 'Guardando…' : 'Guardar tanda'"
+        icon="save"
+        size="block"
+        :disabled="busy"
+        @click="save"
+      />
     </div>
 
     <!-- Teclado numérico tipo calculadora -->

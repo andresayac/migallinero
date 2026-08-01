@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { db } from '@/db/db'
+import { create as createRecord } from '@/db/repository'
 import { useFarmStore } from '@/stores/farm'
 import { useAuthStore } from '@/stores/auth'
 import { useSyncStore } from '@/stores/sync'
 import { useToast } from '@/composables/useToast'
-import { uuid, nowISO } from '@/utils/format'
+import { useSubmit } from '@/composables/useSubmit'
+import { fmtMoney, fmtNumber, toMoney, uuid, nowISO } from '@/utils/format'
 import type { FeedPurchase, FeedPurchaseLine } from '@/types/domain'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
 import BigButton from '@/components/ui/BigButton.vue'
+import DateSelector from '@/components/ui/DateSelector.vue'
 import NumericKeypad from '@/components/ui/NumericKeypad.vue'
 
 const router = useRouter()
@@ -17,44 +19,57 @@ const farm = useFarmStore()
 const auth = useAuthStore()
 const sync = useSyncStore()
 const toast = useToast()
+const { busy, submit } = useSubmit()
+
+/** Los kilos por bulto se guardan con 2 decimales, igual que el backend. */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100
+}
 
 const supplier = ref('')
 const observation = ref('')
 const purchasedAt = ref<string>(nowISO())
+const dateSelector = ref<InstanceType<typeof DateSelector> | null>(null)
 
 /** Bultos por tipo de alimento. */
 const bagsByFeed = ref<Record<string, number>>(
-  Object.fromEntries(farm.feedTypes.map((f) => [f.localUuid, 0])),
+  Object.fromEntries(farm.activeFeedTypes.map((f) => [f.localUuid, 0])),
 )
-/** Kg por bulto (tamaño del bulto: 40, 50…). */
+/** Kg por bulto (tamaño del bulto: 40, 50…). Admite decimales. */
 const kgPerBagByFeed = ref<Record<string, number>>(
-  Object.fromEntries(farm.feedTypes.map((f) => [f.localUuid, 0])),
+  Object.fromEntries(farm.activeFeedTypes.map((f) => [f.localUuid, 0])),
 )
-/** Costo por bulto (COP). */
+/** Costo por bulto. */
 const costPerBagByFeed = ref<Record<string, number>>(
-  Object.fromEntries(farm.feedTypes.map((f) => [f.localUuid, 0])),
+  Object.fromEntries(farm.activeFeedTypes.map((f) => [f.localUuid, 0])),
 )
 
 const totalBags = computed(() =>
-  farm.feedTypes.reduce((sum, f) => sum + (bagsByFeed.value[f.localUuid] ?? 0), 0),
+  farm.activeFeedTypes.reduce((sum, f) => sum + (bagsByFeed.value[f.localUuid] ?? 0), 0),
 )
 const totalQty = computed(() =>
-  farm.feedTypes.reduce((sum, f) => {
-    const bags = bagsByFeed.value[f.localUuid] ?? 0
-    const kg = kgPerBagByFeed.value[f.localUuid] ?? 0
-    return sum + bags * kg
-  }, 0),
+  round2(
+    farm.activeFeedTypes.reduce((sum, f) => {
+      const bags = bagsByFeed.value[f.localUuid] ?? 0
+      const kg = kgPerBagByFeed.value[f.localUuid] ?? 0
+
+      return sum + bags * kg
+    }, 0),
+  ),
 )
 const totalCost = computed(() =>
-  farm.feedTypes.reduce((sum, f) => {
-    const bags = bagsByFeed.value[f.localUuid] ?? 0
-    const cost = costPerBagByFeed.value[f.localUuid] ?? 0
-    return sum + bags * cost
-  }, 0),
+  toMoney(
+    farm.activeFeedTypes.reduce((sum, f) => {
+      const bags = bagsByFeed.value[f.localUuid] ?? 0
+      const cost = costPerBagByFeed.value[f.localUuid] ?? 0
+
+      return sum + bags * cost
+    }, 0),
+  ),
 )
 
 onMounted(() => {
-  for (const f of farm.feedTypes) {
+  for (const f of farm.activeFeedTypes) {
     if (bagsByFeed.value[f.localUuid] === undefined) bagsByFeed.value[f.localUuid] = 0
     if (kgPerBagByFeed.value[f.localUuid] === undefined) kgPerBagByFeed.value[f.localUuid] = 0
     if (costPerBagByFeed.value[f.localUuid] === undefined) costPerBagByFeed.value[f.localUuid] = 0
@@ -71,7 +86,7 @@ const keypadField = ref<KeypadField>('bags')
 const keypadTitles: Record<KeypadField, string> = {
   bags: 'Bultos',
   kgPerBag: 'Kg por bulto',
-  costPerBag: 'Costo por bulto (COP)',
+  costPerBag: 'Costo por bulto',
 }
 
 const keypadColors: Record<KeypadField, string> = {
@@ -102,24 +117,34 @@ const keypadValue = computed(() => {
 
 async function save() {
   if (!farm.farmId) return
+
   if (totalBags.value === 0) {
     toast.error('Agrega al menos un bulto')
+
+    return
+  }
+
+  if (dateSelector.value && !dateSelector.value.isValid) {
+    toast.error(dateSelector.value.validationMessage || 'La fecha no está permitida')
+
     return
   }
 
   const ts = nowISO()
-  const lineRecords: FeedPurchaseLine[] = farm.feedTypes
+
+  const lineRecords: FeedPurchaseLine[] = farm.activeFeedTypes
     .map((f) => {
       const bags = bagsByFeed.value[f.localUuid] ?? 0
-      const kgPerBag = kgPerBagByFeed.value[f.localUuid] ?? 0
-      const unitCost = costPerBagByFeed.value[f.localUuid] ?? 0
+      const kgPerBag = round2(kgPerBagByFeed.value[f.localUuid] ?? 0)
+      const unitCost = toMoney(costPerBagByFeed.value[f.localUuid] ?? 0)
+
       return {
         feedTypeId: f.localUuid,
         feedTypeName: f.name,
         bags,
         kgPerBag,
         unitCost,
-        subtotal: bags * unitCost,
+        subtotal: toMoney(bags * unitCost),
       }
     })
     .filter((l) => l.bags > 0)
@@ -136,24 +161,23 @@ async function save() {
     totalCost: totalCost.value,
     lines: lineRecords,
     pendingSync: true,
-    entryMode: 'auto',
+    entryMode: dateSelector.value?.entryMode ?? 'auto',
+    manualReason: dateSelector.value?.manualReason,
     createdAt: ts,
     updatedAt: ts,
     createdBy: auth.user?.id ?? 'unknown',
   }
 
-  await db.feedPurchases.add(purchase)
-  await db.syncQueue.add({
-    farmId: farm.farmId,
-    entity: 'feed-purchase',
-    action: 'create',
-    localUuid: purchase.localUuid,
-    payload: purchase,
-    attempts: 0,
-    createdAt: ts,
+  const saved = await submit(async () => {
+    await createRecord('feed-purchase', purchase)
+
+    await sync.refreshPending()
+    void sync.forceSync()
+
+    return true
   })
-  await sync.refreshPending()
-  sync.forceSync()
+
+  if (!saved) return
 
   toast.success('Compra de alimento registrada')
   router.replace({ name: 'home' })
@@ -177,10 +201,19 @@ async function save() {
       />
     </label>
 
+    <!-- Fecha de la compra: antes estaba fija a "ahora" y no se podía cambiar -->
+    <DateSelector
+      ref="dateSelector"
+      v-model="purchasedAt"
+      :can-override="auth.isAdmin"
+      label="¿Cuándo la compraste?"
+      class="mb-4"
+    />
+
     <!-- Tarjetas de tipo de alimento -->
     <div class="flex flex-col gap-3">
       <div
-        v-for="ft in farm.feedTypes.filter((f) => f.active)"
+        v-for="ft in farm.activeFeedTypes"
         :key="ft.localUuid"
         class="card"
       >
@@ -214,7 +247,7 @@ async function save() {
             class="text-2xl font-extrabold tabular-nums"
             :class="kgPerBagByFeed[ft.localUuid] > 0 ? 'text-slate-800' : 'text-slate-300'"
           >
-            {{ kgPerBagByFeed[ft.localUuid] > 0 ? kgPerBagByFeed[ft.localUuid] + ' kg' : '—' }}
+            {{ kgPerBagByFeed[ft.localUuid] > 0 ? fmtNumber(kgPerBagByFeed[ft.localUuid], 2) + ' kg' : '—' }}
           </span>
         </button>
 
@@ -229,7 +262,7 @@ async function save() {
             class="text-2xl font-extrabold tabular-nums"
             :class="costPerBagByFeed[ft.localUuid] > 0 ? 'text-slate-800' : 'text-slate-300'"
           >
-            {{ costPerBagByFeed[ft.localUuid] > 0 ? '$ ' + costPerBagByFeed[ft.localUuid].toLocaleString('es-CO') : '—' }}
+            {{ costPerBagByFeed[ft.localUuid] > 0 ? fmtMoney(costPerBagByFeed[ft.localUuid]) : '—' }}
           </span>
         </button>
 
@@ -238,9 +271,9 @@ async function save() {
           v-if="bagsByFeed[ft.localUuid] > 0 && costPerBagByFeed[ft.localUuid] > 0"
           class="mt-2 text-right text-sm font-bold text-grass-600"
         >
-          Subtotal: $ {{ (bagsByFeed[ft.localUuid] * costPerBagByFeed[ft.localUuid]).toLocaleString('es-CO') }}
+          Subtotal: {{ fmtMoney(bagsByFeed[ft.localUuid] * costPerBagByFeed[ft.localUuid]) }}
           <span v-if="kgPerBagByFeed[ft.localUuid] > 0">
-            · {{ bagsByFeed[ft.localUuid] * kgPerBagByFeed[ft.localUuid] }} kg
+            · {{ fmtNumber(bagsByFeed[ft.localUuid] * kgPerBagByFeed[ft.localUuid], 2) }} kg
           </span>
         </p>
       </div>
@@ -265,22 +298,31 @@ async function save() {
       </div>
       <div v-if="totalQty > 0" class="mt-1 flex items-center justify-between">
         <span class="text-base font-semibold text-slate-500">Total kilos</span>
-        <span class="text-2xl font-bold text-slate-700">{{ totalQty }} kg</span>
+        <span class="text-2xl font-bold text-slate-700">{{ fmtNumber(totalQty, 2) }} kg</span>
       </div>
       <div v-if="totalCost > 0" class="mt-2 flex items-center justify-between border-t border-grass-200 pt-2">
         <span class="text-lg font-bold text-slate-600">Total gastado</span>
-        <span class="text-3xl font-extrabold text-grass-700">$ {{ totalCost.toLocaleString('es-CO') }}</span>
+        <span class="text-3xl font-extrabold text-grass-700">{{ fmtMoney(totalCost) }}</span>
       </div>
     </div>
 
     <div class="mt-6">
-      <BigButton label="Guardar compra" icon="save" size="block" @click="save" />
+      <BigButton
+        :label="busy ? 'Guardando…' : 'Guardar compra'"
+        icon="save"
+        size="block"
+        :disabled="busy"
+        @click="save"
+      />
     </div>
 
     <!-- Keypad -->
+    <!-- Los kg por bulto admiten 2 decimales (40,5 kg es un tamaño común):
+         antes el teclado forzaba enteros y no se podía registrar. -->
     <NumericKeypad
       :open="keypadOpen"
       :model-value="keypadValue"
+      :decimals="keypadField === 'kgPerBag' ? 2 : 0"
       :title="`${keypadFeedName} — ${keypadTitles[keypadField]}`"
       :color="keypadColors[keypadField]"
       @update:model-value="onKeypadConfirm"

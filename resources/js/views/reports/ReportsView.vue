@@ -2,48 +2,73 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { db } from '@/db/db'
 import { useFarmStore } from '@/stores/farm'
-import { fmtCOP, fmtDate } from '@/utils/format'
+import {
+  addDays,
+  dayKey,
+  endOfFarmDay,
+  fmtDate,
+  fmtMoney,
+  fmtNumber,
+  shortDayLabel,
+  startOfFarmDay,
+} from '@/utils/format'
 import { exportToPDF, exportToExcel } from '@/utils/export'
-import type { EggCollection, Sale, ChickenMovement } from '@/types/domain'
+import { saleStatusClass, saleStatusLabel } from '@/utils/labels'
+import type { ChickenMovement, EggCollection, Payment, Sale } from '@/types/domain'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
 import BigButton from '@/components/ui/BigButton.vue'
 import PenSelector from '@/components/ui/PenSelector.vue'
 import BaseChart, { type ChartConfig } from '@/components/charts/BaseChart.vue'
 
 const farm = useFarmStore()
+
 const collections = ref<EggCollection[]>([])
 const sales = ref<Sale[]>([])
+const payments = ref<Payment[]>([])
 const movements = ref<ChickenMovement[]>([])
 
 const range = ref<'today' | 'week' | 'month' | 'custom'>('week')
 const customFrom = ref<string>('')
 const customTo = ref<string>('')
 
-function startOfRange(): Date {
-  if (range.value === 'custom' && customFrom.value) {
-    return new Date(customFrom.value)
+/** Tope de días que se pintan en la gráfica diaria. */
+const MAX_CHART_DAYS = 92
+
+/**
+ * Ventana del reporte, calculada UNA vez por cambio de rango.
+ *
+ * Antes `inRange()` construía dos objetos Date por cada elemento de cada filtro,
+ * y con un rango personalizado largo el bucle diario generaba cientos de
+ * etiquetas sin ningún tope.
+ */
+const window = computed(() => {
+  if (range.value === 'custom') {
+    const from = customFrom.value
+      ? startOfFarmDay(new Date(`${customFrom.value}T12:00:00`))
+      : startOfFarmDay()
+    const to = customTo.value ? endOfFarmDay(new Date(`${customTo.value}T12:00:00`)) : endOfFarmDay()
+
+    // Si el usuario invierte las fechas las ordenamos, en vez de no mostrar nada.
+    return from <= to ? { from, to } : { from: startOfFarmDay(to), to: endOfFarmDay(from) }
   }
-  const d = new Date()
-  d.setHours(0, 0, 0, 0)
-  if (range.value === 'today') return d
-  if (range.value === 'week') d.setDate(d.getDate() - 7)
-  if (range.value === 'month') d.setMonth(d.getMonth() - 1)
-  return d
+
+  const to = endOfFarmDay()
+
+  if (range.value === 'today') return { from: startOfFarmDay(), to }
+  if (range.value === 'week') return { from: startOfFarmDay(addDays(new Date(), -6)), to }
+
+  return { from: startOfFarmDay(addDays(new Date(), -29)), to }
+})
+
+function inRange(iso: string | undefined): boolean {
+  if (!iso) return false
+
+  const time = new Date(iso).getTime()
+  if (Number.isNaN(time)) return false
+
+  return time >= window.value.from.getTime() && time <= window.value.to.getTime()
 }
 
-function endOfRange(): Date {
-  if (range.value === 'custom' && customTo.value) {
-    const d = new Date(customTo.value)
-    d.setHours(23, 59, 59, 999)
-    return d
-  }
-  return new Date()
-}
-
-function inRange(dateIso: string): boolean {
-  const t = new Date(dateIso).getTime()
-  return t >= startOfRange().getTime() && t <= endOfRange().getTime()
-}
 function byPen(penId: string | undefined): boolean {
   return !farm.activePenId || penId === farm.activePenId
 }
@@ -51,56 +76,87 @@ function byPen(penId: string | undefined): boolean {
 const eggs = computed(() =>
   collections.value
     .filter((c) => inRange(c.collectionAt) && byPen(c.penId))
-    .reduce((s, c) => s + c.total, 0),
+    .reduce((sum, c) => sum + c.total, 0),
 )
 
+/**
+ * Muertes por FECHA OPERATIVA (`movementAt`), no por cuándo se digitó el dato.
+ * Con `createdAt` una muerte registrada con retraso caía en el período
+ * equivocado y el reporte no cuadraba con lo que pasó en el corral.
+ */
 const deaths = computed(() =>
   movements.value
-    .filter((m) => m.type === 'death' && inRange(m.createdAt) && byPen(m.penId))
-    .reduce((s, m) => s + m.qty, 0),
+    .filter((m) => m.type === 'death' && inRange(m.movementAt ?? m.createdAt) && byPen(m.penId))
+    .reduce((sum, m) => sum + m.qty, 0),
 )
 
+/**
+ * Ingresos = pagos cobrados en el período, excluyendo los anulados.
+ *
+ * Antes se sumaba `sale.paid` de las ventas del período: un abono cobrado
+ * semanas después se contaba en la fecha de la venta, y las ventas anuladas
+ * seguían sumando porque al anular no se tocaba `paid`.
+ */
 const income = computed(() =>
-  sales.value.filter((s) => inRange(s.soldAt)).reduce((s, x) => s + x.paid, 0),
+  payments.value
+    .filter((p) => !p.voidedAt && inRange(p.paidAt))
+    .reduce((sum, p) => sum + p.amount, 0),
 )
 
+/** Deuda de las ventas del período: no anuladas y con saldo. */
 const pendingDebt = computed(() =>
   sales.value
-    .filter((s) => (s.status === 'pending' || s.status === 'partial') && inRange(s.soldAt))
-    .reduce((s, x) => s + x.balance, 0),
+    .filter((s) => s.status !== 'void' && s.balance > 0 && inRange(s.soldAt))
+    .reduce((sum, s) => sum + s.balance, 0),
 )
 
+/**
+ * Producción diaria.
+ *
+ * Las claves se calculan con `dayKey()` (zona horaria de la granja) tanto al
+ * sembrar los días como al agrupar. Antes se mezclaba `date.toISOString()` de
+ * una fecha local con `iso.slice(0, 10)` (UTC), así que en Colombia los buckets
+ * salían desplazados un día y las recolecciones de la tarde caían en el siguiente.
+ */
 const dailyEggs = computed(() => {
-  const map = new Map<string, number>()
-  const start = startOfRange()
-  const end = endOfRange()
-  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-    const key = d.toISOString().slice(0, 10)
-    map.set(key, 0)
+  const buckets = new Map<string, number>()
+  const spanDays =
+    Math.floor((window.value.to.getTime() - window.value.from.getTime()) / 86_400_000) + 1
+  const days = Math.min(Math.max(spanDays, 1), MAX_CHART_DAYS)
+
+  for (let i = 0; i < days; i++) {
+    buckets.set(dayKey(addDays(window.value.from, i)), 0)
   }
-  for (const c of collections.value) {
-    if (!inRange(c.collectionAt) || !byPen(c.penId)) continue
-    const key = c.collectionAt.slice(0, 10)
-    map.set(key, (map.get(key) ?? 0) + c.total)
+
+  for (const collection of collections.value) {
+    if (!inRange(collection.collectionAt) || !byPen(collection.penId)) continue
+
+    const key = dayKey(collection.collectionAt)
+    if (buckets.has(key)) buckets.set(key, (buckets.get(key) ?? 0) + collection.total)
   }
-  const labels = [...map.keys()].map((k) => {
-    const [, m, d] = k.split('-')
-    return `${d}/${m}`
-  })
-  return { labels, values: [...map.values()] }
+
+  return {
+    labels: [...buckets.keys()].map(shortDayLabel),
+    values: [...buckets.values()],
+    truncated: spanDays > MAX_CHART_DAYS,
+  }
 })
 
 const eggsByCategory = computed(() => {
-  const map = new Map<string, number>()
-  for (const c of collections.value) {
-    if (!inRange(c.collectionAt) || !byPen(c.penId)) continue
-    for (const line of c.lines) {
-      const cat = farm.categories.find((x) => x.localUuid === line.categoryId)
-      const name = cat?.name ?? 'Sin categoría'
-      map.set(name, (map.get(name) ?? 0) + line.qty)
+  const buckets = new Map<string, number>()
+
+  for (const collection of collections.value) {
+    if (!inRange(collection.collectionAt) || !byPen(collection.penId)) continue
+
+    for (const line of collection.lines ?? []) {
+      const name =
+        farm.categories.find((c) => c.localUuid === line.categoryId)?.name ?? 'Sin categoría'
+
+      buckets.set(name, (buckets.get(name) ?? 0) + line.qty)
     }
   }
-  return { labels: [...map.keys()], values: [...map.values()] }
+
+  return { labels: [...buckets.keys()], values: [...buckets.values()] }
 })
 
 const lineChartConfig = computed<ChartConfig>(() => ({
@@ -118,33 +174,42 @@ const lineChartConfig = computed<ChartConfig>(() => ({
   ],
 }))
 
+/** Cada porción usa el color real de su categoría, no una lista fija. */
 const doughnutChartConfig = computed<ChartConfig>(() => ({
   type: 'doughnut',
   labels: eggsByCategory.value.labels,
   datasets: [
     {
       data: eggsByCategory.value.values,
-      backgroundColor: ['#16a34a', '#0ea5e9', '#8b5cf6', '#f59e0b', '#ec4899', '#64748b', '#dc2626'],
+      backgroundColor: eggsByCategory.value.labels.map(
+        (label) => farm.categories.find((c) => c.name === label)?.color ?? '#64748b',
+      ),
     },
   ],
 }))
 
 const salesRows = computed(() =>
-  sales.value.filter((s) => inRange(s.soldAt)).sort((a, b) => b.soldAt.localeCompare(a.soldAt)).slice(0, 50),
+  sales.value
+    .filter((s) => inRange(s.soldAt))
+    .sort((a, b) => b.soldAt.localeCompare(a.soldAt))
+    .slice(0, 50),
 )
 
 const rangeLabel = computed(() => {
   if (range.value === 'today') return 'Hoy'
   if (range.value === 'week') return 'Últimos 7 días'
   if (range.value === 'month') return 'Últimos 30 días'
-  return `${fmtDate(startOfRange().toISOString())} a ${fmtDate(endOfRange().toISOString())}`
+
+  return `${fmtDate(window.value.from.toISOString())} a ${fmtDate(window.value.to.toISOString())}`
 })
 
 async function load() {
   if (!farm.farmId) return
-  ;[collections.value, sales.value, movements.value] = await Promise.all([
+
+  ;[collections.value, sales.value, payments.value, movements.value] = await Promise.all([
     db.eggCollections.where('farmId').equals(farm.farmId).toArray(),
     db.sales.where('farmId').equals(farm.farmId).toArray(),
+    db.payments.where('farmId').equals(farm.farmId).toArray(),
     db.chickenMovements.where('farmId').equals(farm.farmId).toArray(),
   ])
 }
@@ -152,48 +217,45 @@ async function load() {
 onMounted(load)
 watch(() => farm.activePenId, load)
 
+const salesColumns = [
+  { key: 'soldAt', label: 'Fecha', format: 'date' as const },
+  { key: 'total', label: 'Total', format: 'money' as const },
+  { key: 'paid', label: 'Pagado', format: 'money' as const },
+  { key: 'balance', label: 'Saldo', format: 'money' as const },
+  { key: 'status', label: 'Estado', translate: (v: unknown) => saleStatusLabel(String(v)) },
+]
+
 function exportSalesPDF() {
-  exportToPDF({
+  void exportToPDF({
     title: 'Ventas',
     subtitle: rangeLabel.value,
     farmName: farm.farmName,
-    fileName: `ventas-${range.value}-${Date.now()}`,
-    columns: [
-      { key: 'soldAt', label: 'Fecha', format: 'date' },
-      { key: 'total', label: 'Total', format: 'cop' },
-      { key: 'paid', label: 'Pagado', format: 'cop' },
-      { key: 'balance', label: 'Saldo', format: 'cop' },
-      { key: 'status', label: 'Estado', format: 'text' },
-    ],
-    rows: salesRows.value as Array<Record<string, unknown>>,
+    fileName: `ventas-${range.value}-${dayKey(new Date())}`,
+    columns: salesColumns,
+    rows: salesRows.value as unknown as Array<Record<string, unknown>>,
   })
 }
 
 function exportSalesExcel() {
-  exportToExcel({
+  void exportToExcel({
     title: 'Ventas',
-    fileName: `ventas-${range.value}-${Date.now()}`,
-    columns: [
-      { key: 'soldAt', label: 'Fecha', format: 'date' },
-      { key: 'total', label: 'Total', format: 'cop' },
-      { key: 'paid', label: 'Pagado', format: 'cop' },
-      { key: 'balance', label: 'Saldo', format: 'cop' },
-      { key: 'status', label: 'Estado', format: 'text' },
-    ],
-    rows: salesRows.value as Array<Record<string, unknown>>,
+    fileName: `ventas-${range.value}-${dayKey(new Date())}`,
+    columns: salesColumns,
+    rows: salesRows.value as unknown as Array<Record<string, unknown>>,
   })
 }
 
 function exportProductionPDF() {
-  const rows = dailyEggs.value.labels.map((lbl, i) => ({
-    day: lbl,
+  const rows = dailyEggs.value.labels.map((label, i) => ({
+    day: label,
     eggs: dailyEggs.value.values[i],
   }))
-  exportToPDF({
+
+  void exportToPDF({
     title: 'Producción de huevos',
     subtitle: rangeLabel.value,
     farmName: farm.farmName,
-    fileName: `produccion-${range.value}-${Date.now()}`,
+    fileName: `produccion-${range.value}-${dayKey(new Date())}`,
     columns: [
       { key: 'day', label: 'Día', format: 'text' },
       { key: 'eggs', label: 'Huevos', format: 'number' },
@@ -214,7 +276,9 @@ function exportProductionPDF() {
         type="button"
         :class="[
           'rounded-xl2 border-2 px-2 py-3 text-sm font-bold',
-          range === r ? 'border-grass-500 bg-grass-50 text-grass-700' : 'border-slate-200 bg-white text-slate-600',
+          range === r
+            ? 'border-grass-500 bg-grass-50 text-grass-700'
+            : 'border-slate-200 bg-white text-slate-600',
         ]"
         @click="range = r"
       >
@@ -225,13 +289,21 @@ function exportProductionPDF() {
     <div v-if="range === 'custom'" class="card mb-4 grid grid-cols-2 gap-3">
       <label class="block">
         <span class="text-sm font-semibold text-slate-600">Desde</span>
-        <input v-model="customFrom" type="date"
-          class="mt-1 w-full rounded-xl2 border-2 border-slate-200 px-3 py-2 text-base focus:border-grass-500 focus:outline-none" />
+        <input
+          v-model="customFrom"
+          type="date"
+          :max="customTo || undefined"
+          class="mt-1 w-full rounded-xl2 border-2 border-slate-200 px-3 py-2 text-base focus:border-grass-500 focus:outline-none"
+        />
       </label>
       <label class="block">
         <span class="text-sm font-semibold text-slate-600">Hasta</span>
-        <input v-model="customTo" type="date"
-          class="mt-1 w-full rounded-xl2 border-2 border-slate-200 px-3 py-2 text-base focus:border-grass-500 focus:outline-none" />
+        <input
+          v-model="customTo"
+          type="date"
+          :min="customFrom || undefined"
+          class="mt-1 w-full rounded-xl2 border-2 border-slate-200 px-3 py-2 text-base focus:border-grass-500 focus:outline-none"
+        />
       </label>
     </div>
 
@@ -242,20 +314,23 @@ function exportProductionPDF() {
     <section class="mb-6 grid grid-cols-2 gap-3">
       <div class="card">
         <p class="text-sm font-semibold text-slate-500">Huevos recogidos</p>
-        <p class="num-big">{{ eggs.toLocaleString('es-CO') }}</p>
+        <p class="num-big">{{ fmtNumber(eggs) }}</p>
       </div>
       <div class="card">
-        <p class="text-sm font-semibold text-slate-500">Ingresos</p>
-        <p class="text-2xl font-extrabold text-grass-600">{{ fmtCOP(income) }}</p>
+        <p class="text-sm font-semibold text-slate-500">Ingresos cobrados</p>
+        <p class="text-2xl font-extrabold text-grass-600">{{ fmtMoney(income) }}</p>
       </div>
       <div class="card">
         <p class="text-sm font-semibold text-slate-500">Muertes</p>
-        <p class="num-big text-alert-600">{{ deaths }}</p>
+        <p class="num-big text-alert-600">{{ fmtNumber(deaths) }}</p>
       </div>
       <div class="card">
         <p class="text-sm font-semibold text-slate-500">Por cobrar</p>
-        <p class="text-2xl font-extrabold" :class="pendingDebt > 0 ? 'text-alert-600' : 'text-slate-800'">
-          {{ fmtCOP(pendingDebt) }}
+        <p
+          class="text-2xl font-extrabold"
+          :class="pendingDebt > 0 ? 'text-alert-600' : 'text-slate-800'"
+        >
+          {{ fmtMoney(pendingDebt) }}
         </p>
       </div>
     </section>
@@ -263,8 +338,17 @@ function exportProductionPDF() {
     <section v-if="dailyEggs.values.some((v) => v > 0)" class="card mb-6">
       <h2 class="mb-3 text-lg font-bold text-slate-700">Producción de huevos</h2>
       <BaseChart :config="lineChartConfig" :height="220" />
-      <BigButton label="Exportar a PDF" icon="save" color="ghost" size="block" class="mt-3"
-        @click="exportProductionPDF" />
+      <p v-if="dailyEggs.truncated" class="mt-2 text-xs text-slate-400">
+        Se muestran los primeros {{ MAX_CHART_DAYS }} días del rango elegido.
+      </p>
+      <BigButton
+        label="Exportar a PDF"
+        icon="save"
+        color="ghost"
+        size="block"
+        class="mt-3"
+        @click="exportProductionPDF"
+      />
     </section>
 
     <section v-if="eggsByCategory.values.length" class="card mb-6">
@@ -286,21 +370,42 @@ function exportProductionPDF() {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="s in salesRows" :key="s.localUuid" class="border-t border-slate-100">
+            <tr
+              v-for="s in salesRows"
+              :key="s.localUuid"
+              class="border-t border-slate-100"
+              :class="{ 'text-slate-400 line-through': s.status === 'void' }"
+            >
               <td class="px-3 py-2">{{ fmtDate(s.soldAt) }}</td>
-              <td class="px-3 py-2 text-right font-semibold">{{ fmtCOP(s.total) }}</td>
-              <td class="px-3 py-2 text-right">{{ fmtCOP(s.paid) }}</td>
-              <td class="px-3 py-2 text-right" :class="s.balance > 0 ? 'text-alert-600 font-bold' : ''">
-                {{ fmtCOP(s.balance) }}
+              <td class="px-3 py-2 text-right font-semibold">{{ fmtMoney(s.total) }}</td>
+              <td class="px-3 py-2 text-right">{{ fmtMoney(s.paid) }}</td>
+              <td
+                class="px-3 py-2 text-right"
+                :class="s.balance > 0 && s.status !== 'void' ? 'font-bold text-alert-600' : ''"
+              >
+                {{ fmtMoney(s.balance) }}
               </td>
-              <td class="px-3 py-2 capitalize">{{ s.status }}</td>
+              <td class="px-3 py-2">
+                <span
+                  class="rounded-full px-2 py-0.5 text-xs font-bold"
+                  :class="saleStatusClass(s.status)"
+                >
+                  {{ saleStatusLabel(s.status) }}
+                </span>
+              </td>
             </tr>
           </tbody>
         </table>
       </div>
       <div class="mt-3 flex gap-2">
         <BigButton label="PDF" icon="save" color="ghost" class="flex-1" @click="exportSalesPDF" />
-        <BigButton label="Excel" icon="save" color="ghost" class="flex-1" @click="exportSalesExcel" />
+        <BigButton
+          label="Excel"
+          icon="save"
+          color="ghost"
+          class="flex-1"
+          @click="exportSalesExcel"
+        />
       </div>
     </section>
 

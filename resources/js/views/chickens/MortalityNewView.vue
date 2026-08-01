@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { db } from '@/db/db'
+import { create as createRecord } from '@/db/repository'
 import { useFarmStore } from '@/stores/farm'
 import { useAuthStore } from '@/stores/auth'
 import { useSyncStore } from '@/stores/sync'
 import { useToast } from '@/composables/useToast'
+import { useSubmit } from '@/composables/useSubmit'
 import { uuid, nowISO } from '@/utils/format'
 import type { ChickenMovement } from '@/types/domain'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
@@ -19,6 +20,7 @@ const farm = useFarmStore()
 const auth = useAuthStore()
 const sync = useSyncStore()
 const toast = useToast()
+const { busy, submit } = useSubmit()
 
 const qty = ref(1)
 const penId = ref('')
@@ -30,52 +32,71 @@ const selectedAt = ref<string>(nowISO())
 const dateSelector = ref<InstanceType<typeof DateSelector> | null>(null)
 
 onMounted(() => {
-  penId.value = farm.activePenId || (farm.pens.length ? farm.pens[0].localUuid : '')
-  if (farm.causes.length) causeId.value = farm.causes[0].localUuid
+  penId.value = farm.activePenId || (farm.activePens.length ? farm.activePens[0].localUuid : '')
+  if (farm.activeCauses.length) causeId.value = farm.activeCauses[0].localUuid
 })
 
 async function save() {
   if (!farm.farmId) return
+
   if (!penId.value) {
     toast.error('Selecciona el galpón')
+
     return
   }
-  const cause = farm.causes.find((c) => c.localUuid === causeId.value)
+
+  if (qty.value <= 0) {
+    toast.error('Indica cuántas gallinas murieron')
+
+    return
+  }
+
+  if (dateSelector.value && !dateSelector.value.isValid) {
+    toast.error(dateSelector.value.validationMessage || 'La fecha no está permitida')
+
+    return
+  }
+
+  const cause = farm.activeCauses.find((c) => c.localUuid === causeId.value)
   const ts = nowISO()
   const entryMode = dateSelector.value?.entryMode ?? 'auto'
-  const blobUrl = photoInput.value?.blob ? URL.createObjectURL(photoInput.value.blob) : (photoPath.value || undefined)
-  const m: ChickenMovement = {
-    localUuid: uuid(),
-    farmId: farm.farmId,
-    penId: penId.value,
-    type: 'death',
-    qty: qty.value,
-    reason: cause?.name,
-    observation: observation.value || undefined,
-    photoPath: blobUrl,
-    pendingSync: true,
-    entryMode,
-    manualReason: dateSelector.value?.manualReason,
-    createdAt: selectedAt.value,
-    updatedAt: ts,
-    createdBy: auth.user?.id ?? 'unknown',
-  }
-  await db.chickenMovements.add(m)
-  await db.syncQueue.add({
-    farmId: farm.farmId,
-    entity: 'chicken-movement',
-    action: 'create',
-    localUuid: m.localUuid,
-    payload: m,
-    attempts: 0,
-    createdAt: ts,
-  })
-  await sync.refreshPending()
-  sync.forceSync()
 
-  toast.success(
-    entryMode === 'manual' ? 'Muerte registrada (fecha manual)' : 'Muerte registrada',
-  )
+  const saved = await submit(async () => {
+    // La foto se guarda como Blob en IndexedDB y el registro conserva su
+    // referencia. Antes se metía un `blob:` ObjectURL, que muere al recargar.
+    const photoReference = await photoInput.value?.persistPhoto(farm.farmId)
+
+    const movement: ChickenMovement = {
+      localUuid: uuid(),
+      farmId: farm.farmId,
+      penId: penId.value,
+      type: 'death',
+      qty: qty.value,
+      // `movementAt` es la fecha operativa y la columna del backend es NOT NULL:
+      // sin ella la sincronización fallaba con error de SQL en cada intento.
+      movementAt: selectedAt.value,
+      reason: cause?.name,
+      observation: observation.value || undefined,
+      photoPath: photoReference || photoPath.value || undefined,
+      pendingSync: true,
+      entryMode,
+      manualReason: dateSelector.value?.manualReason,
+      createdAt: ts,
+      updatedAt: ts,
+      createdBy: auth.user?.id ?? 'unknown',
+    }
+
+    await createRecord('chicken-movement', movement)
+
+    await sync.refreshPending()
+    void sync.forceSync()
+
+    return true
+  })
+
+  if (!saved) return
+
+  toast.success(entryMode === 'manual' ? 'Muerte registrada (fecha manual)' : 'Muerte registrada')
   router.replace({ name: 'home' })
 }
 </script>
@@ -110,7 +131,7 @@ async function save() {
       <span class="text-base font-semibold text-slate-600">Causa</span>
       <select v-model="causeId"
         class="mt-1 w-full rounded-xl2 border-2 border-slate-200 bg-white px-4 py-3 text-xl focus:border-grass-500 focus:outline-none">
-        <option v-for="c in farm.causes" :key="c.localUuid" :value="c.localUuid">{{ c.name }}</option>
+        <option v-for="c in farm.activeCauses" :key="c.localUuid" :value="c.localUuid">{{ c.name }}</option>
       </select>
     </label>
 
@@ -127,6 +148,13 @@ async function save() {
       class="mb-4"
     />
 
-    <BigButton label="Guardar" icon="save" color="alert" size="block" @click="save" />
+    <BigButton
+      :label="busy ? 'Guardando…' : 'Guardar'"
+      icon="save"
+      color="alert"
+      size="block"
+      :disabled="busy"
+      @click="save"
+    />
   </ScreenShell>
 </template>

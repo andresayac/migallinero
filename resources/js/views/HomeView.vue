@@ -7,45 +7,72 @@ import PenSelector from '@/components/ui/PenSelector.vue'
 import AlertBanner from '@/components/ui/AlertBanner.vue'
 import { useFarmStore } from '@/stores/farm'
 import { useAuthStore } from '@/stores/auth'
-import { useSyncStore, todayEggs, aliveChickens, pendingDebt, nextVaccine } from '@/stores/sync'
+import {
+  todayEggs,
+  aliveChickens,
+  pendingDebt,
+  nextVaccine,
+  overdueVaccine,
+} from '@/stores/sync'
 import { useAlerts, type Alert } from '@/composables/useAlerts'
-import { fmtCOP } from '@/utils/format'
+import { fmtMoney, fmtNumber, startOfFarmDay } from '@/utils/format'
 import type { Vaccine } from '@/types/domain'
 
 const router = useRouter()
 const farm = useFarmStore()
 const auth = useAuthStore()
-const sync = useSyncStore()
 const alerts = useAlerts()
 
 const eggsToday = ref<number>(0)
 const alive = ref<number>(0)
 const debt = ref<number>(0)
 const vaccine = ref<Vaccine | undefined>(undefined)
+const overdue = ref<Vaccine | undefined>(undefined)
 const activeAlerts = ref<Alert[]>([])
 
+/**
+ * Etiqueta de la próxima vacuna.
+ * Una vacuna atrasada mostraba "Hoy" por el `Math.max(0, …)`: ahora se muestra
+ * como atrasada, que es la información que el granjero necesita.
+ */
 const vaccineLabel = computed(() => {
+  if (overdue.value?.nextAt) {
+    const days = Math.ceil((startOfFarmDay().getTime() - new Date(overdue.value.nextAt).getTime()) / 86_400_000)
+
+    return `Atrasada ${days} día${days === 1 ? '' : 's'}`
+  }
+
   if (!vaccine.value?.nextAt) return 'Sin programar'
-  const future = Math.max(0, Math.ceil((new Date(vaccine.value.nextAt).getTime() - Date.now()) / 86_400_000))
-  return future === 0 ? 'Hoy' : `En ${future} días`
+
+  const days = Math.ceil(
+    (new Date(vaccine.value.nextAt).getTime() - startOfFarmDay().getTime()) / 86_400_000,
+  )
+
+  return days <= 0 ? 'Hoy' : `En ${days} día${days === 1 ? '' : 's'}`
 })
+
+const vaccineName = computed(() => overdue.value?.name ?? vaccine.value?.name ?? '—')
+const vaccineOverdue = computed(() => !!overdue.value)
 
 /** Resumen filtrado por el galpón activo ('' = Todos). */
 async function refresh() {
   if (!farm.farmId) return
-  ;[eggsToday.value, alive.value, debt.value, vaccine.value, activeAlerts.value] = await Promise.all([
-    todayEggs(farm.farmId, farm.activePenId),
-    aliveChickens(farm.farmId, farm.activePenId),
-    pendingDebt(farm.farmId),
-    nextVaccine(farm.farmId, farm.activePenId),
-    alerts.compute(),
-  ])
+
+  ;[eggsToday.value, alive.value, debt.value, vaccine.value, overdue.value, activeAlerts.value] =
+    await Promise.all([
+      todayEggs(farm.farmId, farm.activePenId),
+      aliveChickens(farm.farmId, farm.activePenId),
+      pendingDebt(farm.farmId),
+      nextVaccine(farm.farmId, farm.activePenId),
+      overdueVaccine(farm.farmId, farm.activePenId),
+      alerts.compute(),
+    ])
 }
 
-onMounted(async () => {
-  await refresh()
-  sync.setupListeners()
-})
+// `setupListeners()` ya se llama una vez en main.ts y es idempotente. Antes se
+// invocaba también aquí sin guarda, así que cada visita al Home añadía otro
+// intervalo de sincronización y otro par de listeners.
+onMounted(refresh)
 
 // Reaccionar al cambio de galpón: refresca los números del resumen.
 watch(() => farm.activePenId, () => refresh())
@@ -102,17 +129,21 @@ const menu = computed(() => [
           </span>
           <span v-else-if="farm.activePens.length > 1" class="ml-1 text-xs text-slate-400">· Todos</span>
         </p>
-        <p class="num-big">{{ alive.toLocaleString('es-CO') }}</p>
+        <p class="num-big">{{ fmtNumber(alive) }}</p>
       </div>
-      <div class="card">
+      <div class="card" :class="{ 'ring-2 ring-alert-300': vaccineOverdue }">
         <p class="text-sm font-semibold text-slate-500">Próxima vacuna</p>
-        <p class="text-2xl font-bold text-grass-600">{{ vaccine?.name ?? '—' }}</p>
-        <p class="text-base text-slate-500">{{ vaccineLabel }}</p>
+        <p class="text-2xl font-bold" :class="vaccineOverdue ? 'text-alert-600' : 'text-grass-600'">
+          {{ vaccineName }}
+        </p>
+        <p class="text-base" :class="vaccineOverdue ? 'font-bold text-alert-600' : 'text-slate-500'">
+          {{ vaccineLabel }}
+        </p>
       </div>
       <div class="card" :class="{ 'ring-2 ring-alert-300': debt > 0 }">
         <p class="text-sm font-semibold text-slate-500">Por cobrar</p>
         <p class="text-2xl font-bold" :class="debt > 0 ? 'text-alert-600' : 'text-slate-800'">
-          {{ fmtCOP(debt) }}
+          {{ fmtMoney(debt) }}
         </p>
       </div>
     </section>

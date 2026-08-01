@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { db } from '@/db/db'
+import { create as createRecord } from '@/db/repository'
 import { useFarmStore } from '@/stores/farm'
 import { useAuthStore } from '@/stores/auth'
 import { useSyncStore } from '@/stores/sync'
 import { useToast } from '@/composables/useToast'
+import { useSubmit } from '@/composables/useSubmit'
 import { uuid, nowISO } from '@/utils/format'
 import type { Incident, IncidentSeverity } from '@/types/domain'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
@@ -16,6 +17,7 @@ const farm = useFarmStore()
 const auth = useAuthStore()
 const sync = useSyncStore()
 const toast = useToast()
+const { busy, submit } = useSubmit()
 
 const types = ['Salud', 'Alimentación', 'Agua', 'Infraestructura', 'Seguridad', 'Comportamiento', 'Producción', 'Otra']
 const type = ref('Salud')
@@ -29,30 +31,33 @@ async function save() {
     return
   }
   const ts = nowISO()
-  const inc: Incident = {
+
+  const incident: Incident = {
     localUuid: uuid(),
     farmId: farm.farmId,
     type: type.value,
+    // El galpón activo da contexto a la novedad; antes se perdía.
+    penId: farm.activePenId || undefined,
     description: description.value.trim(),
     severity: severity.value,
     status: 'open',
     pendingSync: true,
+    entryMode: 'auto',
     createdAt: ts,
     updatedAt: ts,
     createdBy: auth.user?.id ?? 'unknown',
   }
-  await db.incidents.add(inc)
-  await db.syncQueue.add({
-    farmId: farm.farmId,
-    entity: 'incident',
-    action: 'create',
-    localUuid: inc.localUuid,
-    payload: inc,
-    attempts: 0,
-    createdAt: ts,
+
+  const saved = await submit(async () => {
+    await createRecord('incident', incident)
+
+    await sync.refreshPending()
+    void sync.forceSync()
+
+    return true
   })
-  await sync.refreshPending()
-  sync.forceSync()
+
+  if (!saved) return
 
   toast.success('Novedad registrada')
   router.replace({ name: 'home' })
@@ -89,6 +94,13 @@ async function save() {
       </div>
     </div>
 
-    <BigButton label="Guardar" icon="save" color="amber" size="block" @click="save" />
+    <BigButton
+      :label="busy ? 'Guardando…' : 'Guardar'"
+      icon="save"
+      color="amber"
+      size="block"
+      :disabled="busy"
+      @click="save"
+    />
   </ScreenShell>
 </template>
