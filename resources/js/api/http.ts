@@ -10,16 +10,79 @@ export interface BootCatalog {
   [key: string]: unknown
 }
 
+export interface FarmPayload {
+  id: number
+  name: string
+  owner_name?: string | null
+  phone?: string | null
+  country?: string
+  timezone?: string
+  locale?: string
+  currency?: string
+  period_lock_days: number
+}
+
+export interface BootPayload {
+  farm: FarmPayload
+  pens: BootCatalog[]
+  egg_categories: BootCatalog[]
+  presentations: BootCatalog[]
+  mortality_causes: BootCatalog[]
+  feed_types: BootCatalog[]
+}
+
+export interface SessionPayload {
+  token: string
+  user: { id: number; name: string; username: string; role?: string }
+  role?: string
+  farm: FarmPayload
+  boot: BootPayload
+}
+
+/** Catálogos locales que se envían al registrar, para que el servidor siembre los mismos. */
+export interface CatalogSeed {
+  pens?: Array<Record<string, unknown>>
+  egg_categories?: Array<Record<string, unknown>>
+  mortality_causes?: Array<Record<string, unknown>>
+  presentations?: Array<Record<string, unknown>>
+  feed_types?: Array<Record<string, unknown>>
+}
+
+export interface SyncPushItem {
+  entity: string
+  action: 'create' | 'update' | 'delete'
+  local_uuid: string
+  payload: Record<string, unknown>
+}
+
+export interface SyncPushResult {
+  applied: Array<{ entity: string; local_uuid: string; id?: number; action: string }>
+  errors: Array<{
+    local_uuid: string
+    entity: string
+    /** true = no tiene sentido reintentarlo (el servidor rechazó los datos). */
+    permanent: boolean
+    message: string
+  }>
+}
+
+export interface SyncPullResult {
+  server_time: string
+  truncated: boolean
+  data: Record<string, Array<Record<string, unknown>>>
+}
+
 /**
- * Cliente HTTP para la API de Mi Gallinero.
+ * Cliente HTTP de Mi Gallinero.
  *
- * - Base URL: `/api` (Vite proxy → http://localhost:8000 en dev; en Laragon
- *   producción se sirve desde el mismo dominio).
- * - Token Sanctum persistido en localStorage.
- * - Cabecera `X-Farm-Id` con la granja activa.
+ * - Base URL `/api` (mismo origen que la SPA).
+ * - Token Sanctum en localStorage.
+ * - Cabecera `X-Farm-Id` con el id REMOTO de la granja activa: el id local es
+ *   un UUID y el backend espera el entero.
  */
 const TOKEN_KEY = 'mg_token'
 const FARMID_KEY = 'mg_active_farm_id'
+const AUTH_KEY = 'mg_auth'
 
 const http: AxiosInstance = axios.create({
   baseURL: '/api',
@@ -27,7 +90,6 @@ const http: AxiosInstance = axios.create({
   timeout: 20_000,
 })
 
-// Inyectar token y granja activa en cada petición.
 http.interceptors.request.use((config) => {
   const token = localStorage.getItem(TOKEN_KEY)
   if (token) {
@@ -40,16 +102,68 @@ http.interceptors.request.use((config) => {
   return config
 })
 
-// Si recibimos 401, limpiamos sesión (el router redirige a /welcome).
+/**
+ * Suscriptores a la expiración de sesión.
+ *
+ * Antes el interceptor borraba `mg_token` pero dejaba `mg_auth`, así que el
+ * store seguía creyendo que había sesión y toda petición posterior daba 401 en
+ * bucle. Ahora se avisa al store para que limpie su estado de una vez.
+ */
+type UnauthorizedHandler = () => void
+const unauthorizedHandlers = new Set<UnauthorizedHandler>()
+
+export function onUnauthorized(handler: UnauthorizedHandler): () => void {
+  unauthorizedHandlers.add(handler)
+
+  return () => {
+    unauthorizedHandlers.delete(handler)
+  }
+}
+
 http.interceptors.response.use(
   (r) => r,
   (error) => {
     if (error?.response?.status === 401) {
       localStorage.removeItem(TOKEN_KEY)
+      localStorage.removeItem(FARMID_KEY)
+      localStorage.removeItem(AUTH_KEY)
+      unauthorizedHandlers.forEach((handler) => handler())
     }
     return Promise.reject(error)
   },
 )
+
+/** True si el fallo es de red o servidor caído (reintentable), no de los datos. */
+export function isNetworkError(error: unknown): boolean {
+  const err = error as { response?: unknown; code?: string }
+
+  return !err?.response || err.code === 'ECONNABORTED' || err.code === 'ERR_NETWORK'
+}
+
+/**
+ * Mensaje legible de un error de la API.
+ *
+ * Antes cada vista improvisaba: el login convertía cualquier respuesta con
+ * status (incluido un 500 o un 403) en "Usuario o contraseña incorrectos", y el
+ * registro decidía si estaba offline con una expresión regular sobre el texto
+ * del error.
+ */
+export function apiErrorMessage(error: unknown, fallback = 'Algo no salió bien'): string {
+  const err = error as {
+    response?: { status?: number; data?: { message?: string; errors?: Record<string, string[]> } }
+    message?: string
+  }
+
+  if (isNetworkError(error)) return 'Sin conexión con el servidor'
+
+  if (err.response?.status === 429) {
+    return 'Demasiados intentos. Espera un momento e inténtalo de nuevo.'
+  }
+
+  const firstFieldError = Object.values(err.response?.data?.errors ?? {})[0]?.[0]
+
+  return err.response?.data?.message ?? firstFieldError ?? err.message ?? fallback
+}
 
 export const api = {
   setToken(token: string) {
@@ -58,8 +172,8 @@ export const api = {
   clearToken() {
     localStorage.removeItem(TOKEN_KEY)
   },
-  setActiveFarm(id: number | string) {
-    localStorage.setItem(FARMID_KEY, String(id))
+  setActiveFarm(remoteId: number | string) {
+    localStorage.setItem(FARMID_KEY, String(remoteId))
   },
   clearActiveFarm() {
     localStorage.removeItem(FARMID_KEY)
@@ -68,115 +182,105 @@ export const api = {
     return !!localStorage.getItem(TOKEN_KEY)
   },
 
-  /** Auth registro (crea granja). `setup` = configuración del asistente guiado. */
-  async register(
-    name: string,
-    username: string,
-    password: string,
-    farmName: string,
-    setup?: {
-      currency?: string
-      country?: string
-      timezone?: string
-      locale?: string
-      period_lock_days?: number
-      phone?: string
-    },
-  ) {
-    const { data } = await http.post('/auth/register', {
-      name,
-      username,
-      password,
-      farm_name: farmName,
-      ...setup,
-    })
-    return data as { token: string; user: unknown; farm: { id: number; name: string } }
+  /** Registro: crea usuario + granja y siembra los catálogos que ya existen en local. */
+  async register(payload: {
+    name: string
+    username: string
+    password: string
+    farm_name: string
+    currency?: string
+    country?: string
+    timezone?: string
+    locale?: string
+    period_lock_days?: number
+    phone?: string
+    catalogs?: CatalogSeed
+  }) {
+    const { data } = await http.post('/auth/register', payload)
+
+    return data as SessionPayload
+  },
+
+  async login(username: string, password: string) {
+    const { data } = await http.post('/auth/login', { username, password })
+
+    return data as SessionPayload
   },
 
   /** Actualiza la configuración de la granja activa (asistente + ajustes). */
   async updateFarm(patch: Record<string, unknown>) {
     const { data } = await http.put('/farm', patch)
-    return data as {
-      farm: { id: number; name: string; period_lock_days: number; currency: string }
-      boot: unknown
-    }
-  },
 
-  async login(username: string, password: string) {
-    const { data } = await http.post('/auth/login', { username, password })
-    return data as { token: string; user: unknown; farm: { id: number; name: string } }
+    return data as { farm: FarmPayload; boot: BootPayload }
   },
 
   async me() {
     const { data } = await http.get('/auth/me')
-    return data
+
+    return data as { user: SessionPayload['user']; farm: FarmPayload; role?: string }
   },
 
-  /**
-   * Snapshot de catálogos de la granja activa.
-   * Permite al cliente mapear UUIDs locales → ids numéricos del backend.
-   */
+  /** Snapshot de catálogos de la granja activa (mapea local_uuid → id numérico). */
   async boot() {
     const { data } = await http.get('/auth/boot')
-    return data as {
-      farm: {
-        id: number
-        name: string
-        owner_name?: string
-        phone?: string | null
-        country?: string
-        timezone?: string
-        locale?: string
-        currency?: string
-        period_lock_days: number
-      }
-      pens: BootCatalog[]
-      egg_categories: BootCatalog[]
-      presentations: BootCatalog[]
-      mortality_causes: BootCatalog[]
-      feed_types: BootCatalog[]
-    }
+
+    return data as BootPayload
   },
 
   async logout() {
     try {
       await http.post('/auth/logout')
     } catch {
-      /* noop */
+      /* cerrar la sesión en local es lo que importa */
     }
   },
 
+  async changePassword(currentPassword: string, password: string, passwordConfirmation: string) {
+    await http.post('/auth/password', {
+      current_password: currentPassword,
+      password,
+      password_confirmation: passwordConfirmation,
+    })
+  },
+
+  async setPin(pin: string, currentPassword: string) {
+    await http.post('/auth/pin', { pin, current_password: currentPassword })
+  },
+
+  /** Verifica el PIN del admin contra el servidor. */
+  async verifyPin(pin: string) {
+    const { data } = await http.post('/auth/pin/verify', { pin })
+
+    return data as { valid: boolean; message?: string }
+  },
+
   /** Resumen del Home */
-  async dashboardSummary(penId?: string) {
-    const params = penId ? { pen: penId } : undefined
-    const { data } = await http.get('/dashboard/summary', { params })
+  async dashboardSummary(penRemoteId?: number) {
+    const { data } = await http.get('/dashboard/summary', {
+      params: penRemoteId ? { pen: penRemoteId } : undefined,
+    })
+
     return data as {
       today_eggs: number
       alive_chickens: number
       pending_debt: number
       next_vaccine: unknown
+      overdue_vaccine: unknown
+      timezone: string
     }
   },
 
-  /** Subida bulk idempotente de la cola de sincronización */
-  async syncPush(
-    items: Array<{
-      entity: string
-      action: 'create' | 'update' | 'delete'
-      local_uuid: string
-      payload: Record<string, unknown>
-    }>,
-  ) {
+  /** Subida idempotente de la cola de sincronización. */
+  async syncPush(items: SyncPushItem[]) {
     const { data } = await http.post('/sync/push', { items })
-    return data as {
-      applied: Array<{ entity: string; local_uuid: string; id?: number; action: string }>
-      errors: Array<{ local_uuid: string; entity: string; error: string }>
-    }
+
+    return data as SyncPushResult
   },
 
-  /** Pull de catálogos/registros para llenar Dexie al login. */
-  async listEntity(entity: string, perPage = 500) {
-    const { data } = await http.get(`/${entity}`, { params: { per_page: perPage } })
-    return data as { data: unknown[] }
+  /** Descarga de los datos de la granja (reconstruye la base local). */
+  async syncPull(params: { since?: string; entities?: string[]; limit?: number } = {}) {
+    const { data } = await http.get('/sync/pull', { params })
+
+    return data as SyncPullResult
   },
 }

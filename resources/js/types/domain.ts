@@ -17,7 +17,10 @@ export type ChickenMovementType =
   | 'adjust'
 
 export interface Farm {
+  /** Identidad local y estable de la granja (UUID). Nunca cambia. */
   id: string
+  /** Id numérico en el backend, cuando ya está registrada. */
+  remoteId?: number
   name: string
   ownerName: string
   phone?: string
@@ -176,6 +179,12 @@ export interface ChickenMovement extends OfflineRecord {
   penId: string
   type: ChickenMovementType
   qty: number
+  /**
+   * Fecha operativa del movimiento (cuándo pasó), distinta de `createdAt`
+   * (cuándo se digitó). La columna `movement_at` del backend es NOT NULL: sin
+   * este campo la sincronización fallaba con error de SQL en cada intento.
+   */
+  movementAt: string
   reason?: string
   observation?: string
   photoPath?: string
@@ -229,23 +238,65 @@ export interface SaleLine {
 }
 
 export interface Payment extends OfflineRecord {
-  saleId: string
+  /** Vacío cuando es un abono al saldo global del cliente, sin venta concreta. */
+  saleId?: string
   customerId: string
   amount: number
   method?: string
   paidAt: string
   observation?: string
+  /** Fecha de anulación (se anula al anular la venta asociada). */
+  voidedAt?: string
 }
+
+/** Entidades que viajan en la cola de sincronización (nombres del cliente). */
+export type SyncEntity =
+  | 'pen'
+  | 'egg-category'
+  | 'presentation'
+  | 'mortality-cause'
+  | 'feed-type'
+  | 'customer'
+  | 'egg-collection'
+  | 'chicken-movement'
+  | 'vaccine'
+  | 'incident'
+  | 'sale'
+  | 'payment'
+  | 'feed-record'
+  | 'feed-purchase'
+
+export type SyncAction = 'create' | 'update' | 'delete'
 
 /** Elemento en la cola de sincronización. */
 export interface SyncQueueItem {
   id?: number
   farmId: string
-  entity: string
-  action: 'create' | 'update' | 'delete'
+  entity: SyncEntity
+  action: SyncAction
   localUuid: string
-  payload: unknown
+  payload: Record<string, unknown>
+  /** Intentos fallidos acumulados; alimenta el backoff exponencial. */
   attempts: number
+  /** Momento a partir del cual se puede reintentar (ISO). */
+  nextAttemptAt?: string
+  /**
+   * `failed` marca un error permanente (validación rechazada por el servidor):
+   * se deja de reintentar y se muestra al usuario para que lo corrija, en vez
+   * de reenviarlo cada 30 segundos para siempre.
+   */
+  status?: 'pending' | 'failed'
   lastError?: string
   createdAt: string
+}
+
+/** Foto pendiente de subir, guardada como Blob real (no como ObjectURL). */
+export interface PhotoRecord {
+  localUuid: string
+  farmId: string
+  blob: Blob
+  mime: string
+  createdAt: string
+  /** true mientras no se haya subido al backend. */
+  pendingUpload: boolean
 }

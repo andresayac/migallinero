@@ -13,20 +13,39 @@ import { useSyncStore } from './stores/sync'
 const app = createApp(App)
 const pinia = createPinia()
 app.use(pinia)
-app.use(router)
 
-// Restaurar sesión y granja activa antes de montar (offline-first).
 const auth = useAuthStore()
 const farm = useFarmStore()
 const sync = useSyncStore()
-auth.restore()
-// Validar el token contra el backend: si sigue válido, el usuario entra
-// directo sin volver a loguear. Si expiró, se limpia y el router manda a
-// /welcome. Si no hay red, se mantiene la sesión local (offline-first).
-void auth.validateSession().finally(() => {
-  void farm.init().then(() => {
-    sync.setupListeners()
-    sync.refreshPending()
-  })
-})
-app.mount('#app')
+
+/**
+ * Restaura la sesión ANTES de montar y de instalar el router.
+ *
+ * `restore()` e `init()` sólo leen localStorage e IndexedDB, así que son
+ * rápidos. Antes la app se montaba de inmediato y `farm.init()` corría dentro
+ * de un `.finally()` asíncrono: en el primer render `farm.isConfigured` aún era
+ * false y el guard del router mandaba a `/welcome` a un usuario con sesión válida.
+ */
+async function bootstrap() {
+  auth.restore()
+  await farm.init()
+
+  app.use(router)
+  await router.isReady()
+  app.mount('#app')
+
+  // Lo que necesita red va después de montar: la app ya es usable sin conexión.
+  const stillValid = await auth.validateSession()
+
+  if (stillValid && auth.hasBackendSession && farm.isConfigured) {
+    // Enlaza los catálogos locales con los ids del backend y baja lo que falte.
+    await farm.mergeCatalogsFromBackend()
+    await sync.pullFromServer()
+  }
+
+  sync.setupListeners()
+  await sync.refreshPending()
+  void sync.forceSync()
+}
+
+void bootstrap()

@@ -60,21 +60,25 @@ const router = createRouter({
       path: '/sales/new',
       name: 'sales-new',
       component: () => import('@/views/sales/SaleNewView.vue'),
+      meta: { roles: ['admin', 'vendedor'] },
     },
     {
       path: '/sales',
       name: 'sales-list',
       component: () => import('@/views/sales/SalesListView.vue'),
+      meta: { roles: ['admin', 'vendedor'] },
     },
     {
       path: '/customers/debts',
       name: 'customers-debts',
       component: () => import('@/views/customers/DebtsView.vue'),
+      meta: { roles: ['admin', 'vendedor'] },
     },
     {
       path: '/customers',
       name: 'customers',
       component: () => import('@/views/customers/CustomersView.vue'),
+      meta: { roles: ['admin', 'vendedor'] },
     },
     {
       path: '/vaccines/new',
@@ -100,11 +104,13 @@ const router = createRouter({
       path: '/settings/pens',
       name: 'settings-pens',
       component: () => import('@/views/settings/PensView.vue'),
+      meta: { roles: ['admin'] },
     },
     {
       path: '/settings/catalogs',
       name: 'settings-catalogs',
       component: () => import('@/views/settings/CatalogsView.vue'),
+      meta: { roles: ['admin'] },
     },
     {
       path: '/settings/audit',
@@ -118,12 +124,36 @@ const router = createRouter({
   ],
 })
 
+/**
+ * Guard de acceso.
+ *
+ * `main.ts` restaura la sesión y la granja ANTES de instalar el router, así que
+ * aquí el estado ya está cargado y no hay carrera. Además comprobamos el rol de
+ * las pantallas restringidas: la interfaz debe ocultar lo que el backend va a
+ * rechazar de todas formas.
+ */
 router.beforeEach((to) => {
   const auth = useAuthStore()
   const farm = useFarmStore()
-  if (!to.meta.public && (!auth.isLoggedIn || !farm.isConfigured)) {
+
+  if (to.meta.public) {
+    // Con sesión activa no tiene sentido volver a la pantalla de bienvenida.
+    if (auth.isLoggedIn && farm.isConfigured) return { name: 'home' }
+
+    return true
+  }
+
+  if (!auth.isLoggedIn || !farm.isConfigured) {
     return { name: 'welcome' }
   }
+
+  const required = to.meta.roles as string[] | undefined
+
+  if (required && !required.includes(auth.role ?? '')) {
+    return { name: 'home' }
+  }
+
+  return true
 })
 
 export default router
