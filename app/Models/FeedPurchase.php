@@ -18,7 +18,8 @@ class FeedPurchase extends Model
     protected $casts = [
         'purchased_at' => 'datetime',
         'total_bags' => 'integer',
-        'total_qty' => 'integer',
+        // Bultos × kg por bulto rara vez es entero (2 × 40,5 = 81).
+        'total_qty' => 'decimal:2',
         'total_cost' => 'integer',
     ];
 

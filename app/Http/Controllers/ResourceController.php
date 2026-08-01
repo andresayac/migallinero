@@ -2,212 +2,142 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\ChickenMovement;
-use App\Models\Customer;
-use App\Models\EggCategory;
-use App\Models\EggCollection;
-use App\Models\FeedRecord;
-use App\Models\FeedPurchase;
-use App\Models\FeedType;
-use App\Models\Incident;
-use App\Models\MortalityCause;
-use App\Models\Payment;
-use App\Models\Pen;
-use App\Models\Presentation;
-use App\Models\Sale;
-use App\Models\Vaccine;
+use App\Tenancy\ActiveFarmResolver;
+use App\Tenancy\EntityRegistry;
+use App\Tenancy\EntityWriter;
+use App\Tenancy\FarmPermissions;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 
 /**
- * Controlador genérico CRUD para cualquier modelo con trait BelongsToFarm.
+ * Controlador genérico CRUD para las entidades con trait BelongsToFarm.
  *
- * Mapa `entity` (snake case plural del modelo) → clase del modelo.
- * Útil para leer catálogos y registros operativos desde el MVP sin crear
- * 14 controladores idénticos. Se apoya en el middleware `active.farm` para
- * que el trait inyecte el farm_id en cada consulta y creación.
+ * El aislamiento por granja lo garantiza el global scope del trait (activado
+ * por el middleware `active.farm`), así que `findOrFail` nunca puede alcanzar
+ * un registro de otra granja. La autorización por rol la resuelve
+ * `FarmPermissions`, y la validación/normalización `EntityWriter`.
  */
 class ResourceController extends Controller
 {
-    /** Mapa entity => clase del modelo (sólo entidades accesibles vía este endpoint). */
-    protected array $modelMap = [
-        'pens' => Pen::class,
-        'egg_categories' => EggCategory::class,
-        'presentations' => Presentation::class,
-        'mortality_causes' => MortalityCause::class,
-        'egg_collections' => EggCollection::class,
-        'chicken_movements' => ChickenMovement::class,
-        'vaccines' => Vaccine::class,
-        'incidents' => Incident::class,
-        'customers' => Customer::class,
-        'sales' => Sale::class,
-        'payments' => Payment::class,
-        'feed_types' => FeedType::class,
-        'feed_records' => FeedRecord::class,
-        'feed_purchases' => FeedPurchase::class,
-    ];
+    public function __construct(
+        private EntityWriter $writer,
+        private ActiveFarmResolver $resolver,
+    ) {}
 
     public function index(Request $request, string $entity)
     {
+        $this->authorizeAction($entity, 'read');
+
+        $validated = $request->validate([
+            'per_page' => ['sometimes', 'integer', 'min:1', 'max:500'],
+            'since' => ['sometimes', 'date'],
+            'page' => ['sometimes', 'integer', 'min:1'],
+        ]);
+
         $model = $this->resolveModel($entity);
-        $builder = $model::query();
 
-        // Carga selectiva de relaciones para entidades con líneas.
-        if (in_array($entity, ['sales', 'egg_collections', 'feed_records', 'feed_purchases'])) {
-            $builder->with(['lines']);
-        }
-        if ($entity === 'sales') {
-            $builder->with(['customer']);
-        }
-        if ($entity === 'feed_records') {
-            $builder->with(['pen']);
+        $builder = $model::query()->with(EntityRegistry::relations($entity));
+
+        // Permite sincronización incremental: sólo lo cambiado desde `since`.
+        if (isset($validated['since'])) {
+            $builder->where('updated_at', '>=', $validated['since']);
         }
 
-        $limit = min($request->integer('per_page', 100), 500);
-
-        return response()->json($builder->latest('id')->paginate($limit));
+        return response()->json(
+            $builder->orderBy('id')->paginate($validated['per_page'] ?? 100)
+        );
     }
 
     public function store(Request $request, string $entity)
     {
-        $model = $this->resolveModel($entity);
-        $data = $this->prepareData($request, $model);
+        $this->authorizeAction($entity, 'write');
 
-        $instance = DB::transaction(function () use ($model, $data, $request) {
-            $instance = $model::create($data);
-            $this->handleRelations($instance, $data, $request);
+        $instance = $this->writer->upsert(
+            $entity,
+            $request->all(),
+            $this->findByLocalUuid($entity, $request->input('localUuid') ?? $request->input('local_uuid')),
+            $request->user()?->id,
+        );
 
-            return $instance;
-        });
-
-        return response()->json($instance->fresh($this->relationsFor($instance)), 201);
+        return response()->json(
+            $instance->fresh(EntityRegistry::relations($entity)),
+            201
+        );
     }
 
     public function show(Request $request, string $entity, int $id)
     {
-        $model = $this->resolveModel($entity);
-        $instance = $model::with($this->relationsFor($model))->findOrFail($id);
+        $this->authorizeAction($entity, 'read');
 
-        return response()->json($instance);
+        $model = $this->resolveModel($entity);
+
+        return response()->json(
+            $model::with(EntityRegistry::relations($entity))->findOrFail($id)
+        );
     }
 
     public function update(Request $request, string $entity, int $id)
     {
+        $this->authorizeAction($entity, 'write');
+
         $model = $this->resolveModel($entity);
         $instance = $model::findOrFail($id);
-        $data = $this->prepareData($request, $model, $instance);
 
-        $instance->update($data);
+        $instance = $this->writer->upsert($entity, $request->all(), $instance, $request->user()?->id);
 
-        return response()->json($instance->fresh($this->relationsFor($instance)));
+        return response()->json($instance->fresh(EntityRegistry::relations($entity)));
     }
 
     public function destroy(Request $request, string $entity, int $id)
     {
+        $this->authorizeAction($entity, 'delete');
+
         $model = $this->resolveModel($entity);
         $instance = $model::findOrFail($id);
-        $instance->delete();
+
+        $this->writer->delete($entity, $instance, $request->user()?->id);
 
         return response()->json(['message' => 'Eliminado']);
     }
 
-    protected function resolveModel(string $entity): string
+    /** @return class-string<Model> */
+    private function resolveModel(string $entity): string
     {
-        if (! isset($this->modelMap[$entity])) {
-            abort(404, "Entidad desconocida: {$entity}");
-        }
+        abort_unless(EntityRegistry::has($entity), 404, "Entidad desconocida: {$entity}");
 
-        return $this->modelMap[$entity];
+        return EntityRegistry::model($entity);
     }
 
     /**
-     * Filtra los campos recibidos a sólo los fillables del modelo y normaliza
-     * los nombres camelCase del frontend → snake_case del backend.
+     * UPSERT idempotente también por REST: si el cliente reintenta un POST con
+     * el mismo local_uuid (típico con conexión intermitente) actualizamos en
+     * vez de duplicar el registro.
      */
-    protected function prepareData(Request $request, string $modelClass, ?Model $existing = null): array
+    private function findByLocalUuid(string $entity, mixed $localUuid): ?Model
     {
-        $fillables = (new $modelClass)->getFillable();
-        $snake = $this->camelToSnake($request->all());
-
-        // Si trae `local_uuid` y no coincide con uno existente, lo guardamos
-        // para garantizar la deduplicación offline (UPSERT idempotente).
-        $data = [];
-        foreach ($fillables as $fillable) {
-            if (array_key_exists($fillable, $snake)) {
-                $data[$fillable] = $snake[$fillable];
-            }
-        }
-        if (! $existing && $request->filled('localUuid')) {
-            $data['local_uuid'] = $request->input('localUuid');
+        if (! is_string($localUuid) || $localUuid === '') {
+            return null;
         }
 
-        return $data;
+        $model = $this->resolveModel($entity);
+
+        return $model::where('local_uuid', $localUuid)->first();
     }
 
-    /**
-     * Crea líneas anidadas (sale_lines para ventas, egg_collection_lines para tandas).
-     */
-    protected function handleRelations(Model $instance, array $data, Request $request): void
+    private function authorizeAction(string $entity, string $action): void
     {
-        $lines = $request->input('lines');
-        if (! is_array($lines)) {
-            return;
-        }
+        abort_unless(EntityRegistry::has($entity), 404, "Entidad desconocida: {$entity}");
 
-        switch (true) {
-            case $instance instanceof Sale:
-                foreach ($lines as $line) {
-                    $instance->lines()->create($this->camelToSnake($line));
-                }
-                break;
-            case $instance instanceof EggCollection:
-                foreach ($lines as $line) {
-                    $instance->lines()->create($this->camelToSnake($line));
-                }
-                break;
-            case $instance instanceof FeedRecord:
-                foreach ($lines as $line) {
-                    $instance->lines()->create($this->camelToSnake($line));
-                }
-                break;
-            case $instance instanceof FeedPurchase:
-                foreach ($lines as $line) {
-                    $instance->lines()->create($this->camelToSnake($line));
-                }
-                break;
-        }
-    }
+        $role = $this->resolver->role();
 
-    protected function relationsFor(Model|string $model): array
-    {
-        return match (true) {
-            $model instanceof Sale, is_string($model) && $model === Sale::class => ['customer', 'lines'],
-            $model instanceof EggCollection, is_string($model) && $model === EggCollection::class => ['lines', 'pen'],
-            $model instanceof FeedRecord, is_string($model) && $model === FeedRecord::class => ['lines', 'pen'],
-            $model instanceof FeedPurchase, is_string($model) && $model === FeedPurchase::class => ['lines'],
-            default => [],
+        $allowed = match ($action) {
+            'read' => FarmPermissions::canRead($role, $entity),
+            'write' => FarmPermissions::canWrite($role, $entity),
+            'delete' => FarmPermissions::canDelete($role, $entity),
+            default => false,
         };
-    }
 
-    /**
-     * Convierte claves camelCase → snake_case de forma recurrente (un nivel).
-     * `localUuid` → `local_uuid`, `collectionAt` → `collection_at`, etc.
-     */
-    protected function camelToSnake(array $data): array
-    {
-        $out = [];
-        foreach ($data as $key => $value) {
-            $snakeKey = Str::snake($key);
-            // Excluir campos de control del cliente.
-            if (in_array($snakeKey, ['pending_sync', 'pendingSync', 'type', 'remote_id', 'remoteid'])) {
-                continue;
-            }
-            $out[$snakeKey] = $value;
-        }
-
-        return $out;
+        abort_unless($allowed, 403, 'Tu rol no tiene permiso para esta acción.');
     }
 }

@@ -18,7 +18,9 @@ class FeedRecord extends Model
 
     protected $casts = [
         'recorded_at' => 'datetime',
-        'total_qty' => 'integer',
+        // Los kilos admiten decimales: con el cast a integer, 12,5 kg se
+        // guardaban como 12 y el consumo salía siempre por debajo.
+        'total_qty' => 'decimal:2',
         'total_cost' => 'integer',
     ];
 

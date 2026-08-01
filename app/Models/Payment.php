@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 #[Fillable([
     'sale_id', 'customer_id', 'amount', 'method', 'paid_at', 'observation',
-    'local_uuid', 'entry_mode', 'manual_reason',
+    'voided_at', 'local_uuid', 'entry_mode', 'manual_reason',
 ])]
 class Payment extends Model
 {
@@ -17,7 +17,14 @@ class Payment extends Model
     protected $casts = [
         'amount' => 'integer',
         'paid_at' => 'datetime',
+        'voided_at' => 'datetime',
     ];
+
+    /** Un pago anulado (por anulación de la venta) no cuenta como ingreso. */
+    public function scopeActive($query)
+    {
+        return $query->whereNull('voided_at');
+    }
 
     public function sale(): BelongsTo
     {
