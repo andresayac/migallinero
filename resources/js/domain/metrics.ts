@@ -163,3 +163,35 @@ export function henDays(
     0,
   )
 }
+
+/**
+ * Huevos puestos en la ventana.
+ *
+ * Cuenta `total`, que es la suma desnormalizada de las líneas y es lo mismo que
+ * usa la tarjeta "Huevos hoy" del inicio: así los dos números coinciden. Entran
+ * todas las categorías, rotos incluidos — una gallina que puso un huevo roto
+ * puso un huevo. El filtro por `sellable` es cosa del inventario y las ventas.
+ */
+export function eggsLaid(
+  collections: EggCollection[],
+  window: MetricsWindow,
+  penId = '',
+): number {
+  return inWindow(collections, window, (c) => c.collectionAt)
+    .filter((c) => !penId || c.penId === penId)
+    .reduce((total, c) => total + c.total, 0)
+}
+
+/**
+ * Porcentaje de postura como fracción (0.82 = 82 %).
+ *
+ * Devuelve `null` si no hay ave-día: sin gallinas la postura es desconocida,
+ * no cero.
+ */
+export function layingRate(input: MetricsInput, window: MetricsWindow): number | null {
+  const days = henDays(input.movements, window, input.penId)
+
+  if (days <= 0) return null
+
+  return eggsLaid(input.collections, window, input.penId) / days
+}

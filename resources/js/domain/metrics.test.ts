@@ -3,12 +3,15 @@ import {
   aliveChickens,
   aliveChickensAt,
   dayKeysBetween,
+  eggsLaid,
   farmDays,
   henDays,
   inWindow,
+  layingRate,
+  type MetricsInput,
 } from './metrics'
 import { dayKey, setRegionalConfig } from '@/utils/format'
-import type { ChickenMovement } from '@/types/domain'
+import type { ChickenMovement, EggCollection } from '@/types/domain'
 
 // Los cálculos por día dependen de la zona horaria de la granja: en Bogotá
 // (UTC-5) una recolección de las 19:00 locales es del día siguiente en UTC.
@@ -175,5 +178,80 @@ describe('henDays', () => {
         to: new Date('2026-07-03T12:00:00.000Z'),
       }),
     ).toBe(0)
+  })
+})
+
+function collection(patch: Partial<EggCollection>): EggCollection {
+  return {
+    localUuid: 'c-1',
+    farmId: 'f-1',
+    pendingSync: false,
+    createdAt: '2026-07-01T12:00:00.000Z',
+    updatedAt: '2026-07-01T12:00:00.000Z',
+    createdBy: 'u-1',
+    type: 'egg-collection',
+    penId: 'pen-a',
+    collectionAt: '2026-07-01T12:00:00.000Z',
+    total: 0,
+    lines: [],
+    ...patch,
+  } as EggCollection
+}
+
+/** MetricsInput vacío al que cada test añade sólo lo que necesita. */
+function input(patch: Partial<MetricsInput> = {}): MetricsInput {
+  return {
+    collections: [],
+    movements: [],
+    sales: [],
+    payments: [],
+    feedRecords: [],
+    feedPurchases: [],
+    feedTypes: [],
+    categories: [],
+    penId: '',
+    ...patch,
+  }
+}
+
+describe('layingRate', () => {
+  const window = {
+    from: new Date('2026-07-01T12:00:00.000Z'),
+    to: new Date('2026-07-02T12:00:00.000Z'),
+  }
+
+  it('divide los huevos entre las ave-día', () => {
+    // 2 días × 100 aves = 200 ave-día. 160 huevos → 80 %.
+    const movements = [movement({ type: 'buy', qty: 100, movementAt: '2026-06-01T10:00:00.000Z' })]
+    const collections = [
+      collection({ collectionAt: '2026-07-01T14:00:00.000Z', total: 80 }),
+      collection({ collectionAt: '2026-07-02T14:00:00.000Z', total: 80 }),
+    ]
+
+    expect(layingRate(input({ movements, collections }), window)).toBeCloseTo(0.8, 5)
+  })
+
+  it('devuelve null cuando no hay aves, en vez de 0', () => {
+    // Sin gallinas la postura es desconocida, no cero. Mostrar 0 % sería mentir.
+    const collections = [collection({ collectionAt: '2026-07-01T14:00:00.000Z', total: 10 })]
+
+    expect(layingRate(input({ collections }), window)).toBeNull()
+  })
+
+  it('cuenta también los huevos rotos: la gallina los puso', () => {
+    // `total` es la suma desnormalizada de las líneas, rotos incluidos.
+    const collections = [collection({ collectionAt: '2026-07-01T14:00:00.000Z', total: 200 })]
+
+    expect(eggsLaid(collections, window)).toBe(200)
+  })
+
+  it('filtra por galpón cuando hay uno activo', () => {
+    const collections = [
+      collection({ collectionAt: '2026-07-01T14:00:00.000Z', total: 50, penId: 'pen-a' }),
+      collection({ collectionAt: '2026-07-01T14:00:00.000Z', total: 30, penId: 'pen-b' }),
+    ]
+
+    expect(eggsLaid(collections, window, 'pen-a')).toBe(50)
+    expect(eggsLaid(collections, window)).toBe(80)
   })
 })
