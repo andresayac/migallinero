@@ -14,6 +14,15 @@ import {
 } from '@/utils/format'
 import { exportToPDF, exportToExcel } from '@/utils/export'
 import { saleStatusClass, saleStatusLabel } from '@/utils/labels'
+import { useMetrics } from '@/composables/useMetrics'
+import {
+  dailyLayingRate,
+  feedConversion,
+  feedCostPerEgg,
+  incomeOverFeedCost,
+  layingRate,
+  type MetricsInput,
+} from '@/domain/metrics'
 import type { ChickenMovement, EggCollection, Payment, Sale } from '@/types/domain'
 import ScreenShell from '@/components/ui/ScreenShell.vue'
 import BigButton from '@/components/ui/BigButton.vue'
@@ -26,6 +35,9 @@ const collections = ref<EggCollection[]>([])
 const sales = ref<Sale[]>([])
 const payments = ref<Payment[]>([])
 const movements = ref<ChickenMovement[]>([])
+
+const metrics = useMetrics()
+const data = ref<MetricsInput | null>(null)
 
 const range = ref<'today' | 'week' | 'month' | 'custom'>('week')
 const customFrom = ref<string>('')
@@ -188,6 +200,37 @@ const doughnutChartConfig = computed<ChartConfig>(() => ({
   ],
 }))
 
+/**
+ * Indicadores del periodo.
+ *
+ * `null` significa "no calculable", no cero: la plantilla muestra "—". Una
+ * postura de 0 % y una postura desconocida son cosas distintas.
+ */
+const rate = computed(() => (data.value ? layingRate(data.value, window.value) : null))
+const conversion = computed(() => (data.value ? feedConversion(data.value, window.value) : null))
+const costPerEgg = computed(() => (data.value ? feedCostPerEgg(data.value, window.value) : null))
+const margin = computed(() => (data.value ? incomeOverFeedCost(data.value, window.value) : null))
+
+/** Serie diaria de postura, en porcentaje. Los días sin aves quedan en 0. */
+const layingChartConfig = computed<ChartConfig>(() => {
+  const series = data.value ? dailyLayingRate(data.value, window.value) : []
+
+  return {
+    type: 'line',
+    labels: series.map((point) => shortDayLabel(point.day)),
+    datasets: [
+      {
+        label: 'Postura (%)',
+        data: series.map((point) => (point.rate === null ? 0 : Math.round(point.rate * 100))),
+        borderColor: '#16a34a',
+        backgroundColor: 'rgba(22,163,74,0.15)',
+        fill: true,
+        tension: 0.3,
+      },
+    ],
+  }
+})
+
 const salesRows = computed(() =>
   sales.value
     .filter((s) => inRange(s.soldAt))
@@ -212,6 +255,8 @@ async function load() {
     db.payments.where('farmId').equals(farm.farmId).toArray(),
     db.chickenMovements.where('farmId').equals(farm.farmId).toArray(),
   ])
+
+  data.value = await metrics.load()
 }
 
 onMounted(load)
@@ -333,6 +378,50 @@ function exportProductionPDF() {
           {{ fmtMoney(pendingDebt) }}
         </p>
       </div>
+    </section>
+
+    <!-- Indicadores del oficio. "—" cuando el dato no se puede calcular. -->
+    <h2 class="mb-3 text-lg font-bold text-slate-700">Indicadores</h2>
+    <section class="mb-6 grid grid-cols-2 gap-3">
+      <div class="card">
+        <p class="text-sm font-semibold text-slate-500">Postura</p>
+        <p class="text-2xl font-extrabold text-grass-600">
+          {{ rate === null ? '—' : `${fmtNumber(rate * 100, 1)} %` }}
+        </p>
+      </div>
+      <div class="card">
+        <p class="text-sm font-semibold text-slate-500">Alimento por docena</p>
+        <p class="text-2xl font-extrabold text-slate-800">
+          {{ conversion === null ? '—' : `${fmtNumber(conversion, 2)} kg` }}
+        </p>
+      </div>
+      <div class="card">
+        <p class="text-sm font-semibold text-slate-500">Costo por huevo</p>
+        <p class="text-2xl font-extrabold text-slate-800">
+          {{ costPerEgg === null ? '—' : fmtMoney(costPerEgg) }}
+        </p>
+        <p class="text-xs text-slate-400">Sólo alimento</p>
+      </div>
+      <div class="card">
+        <p class="text-sm font-semibold text-slate-500">Ingreso menos alimento</p>
+        <p
+          class="text-2xl font-extrabold"
+          :class="(margin?.iofc ?? 0) >= 0 ? 'text-grass-600' : 'text-alert-600'"
+        >
+          {{ margin === null ? '—' : fmtMoney(margin.iofc) }}
+        </p>
+        <p class="text-xs text-slate-400">
+          Ventas {{ margin === null ? '—' : fmtMoney(margin.sales) }}
+        </p>
+      </div>
+    </section>
+
+    <section v-if="rate !== null" class="card mb-6">
+      <h2 class="mb-3 text-lg font-bold text-slate-700">Postura por día</h2>
+      <BaseChart :config="layingChartConfig" :height="220" />
+      <p class="mt-2 text-xs text-slate-400">
+        Huevos por gallina y día. Una caída sostenida avisa antes que cualquier otra señal.
+      </p>
     </section>
 
     <section v-if="dailyEggs.values.some((v) => v > 0)" class="card mb-6">
