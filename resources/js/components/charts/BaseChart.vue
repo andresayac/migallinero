@@ -36,7 +36,12 @@ Chart.register(
 
 export interface ChartDataset {
   label?: string
-  data: number[]
+  /**
+   * `null` deja un hueco en la línea, que es lo correcto para un dato que no se
+   * puede calcular. Dibujarlo como 0 diría que ese día la postura fue del 0 %,
+   * cuando lo cierto es que no se sabe.
+   */
+  data: (number | null)[]
   borderColor?: string
   backgroundColor?: string | string[]
   fill?: boolean

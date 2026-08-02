@@ -211,7 +211,13 @@ const conversion = computed(() => (data.value ? feedConversion(data.value, windo
 const costPerEgg = computed(() => (data.value ? feedCostPerEgg(data.value, window.value) : null))
 const margin = computed(() => (data.value ? incomeOverFeedCost(data.value, window.value) : null))
 
-/** Serie diaria de postura, en porcentaje. Los días sin aves quedan en 0. */
+/**
+ * Serie diaria de postura, en porcentaje.
+ *
+ * Un día sin aves va como `null`, no como 0: Chart.js deja el hueco en la línea.
+ * Pintarlo en cero afirmaría que ese día la postura fue del 0 %, cuando lo
+ * cierto es que no se puede saber.
+ */
 const layingChartConfig = computed<ChartConfig>(() => {
   const series = data.value ? dailyLayingRate(data.value, window.value) : []
 
@@ -221,7 +227,7 @@ const layingChartConfig = computed<ChartConfig>(() => {
     datasets: [
       {
         label: 'Postura (%)',
-        data: series.map((point) => (point.rate === null ? 0 : Math.round(point.rate * 100))),
+        data: series.map((point) => (point.rate === null ? null : Math.round(point.rate * 100))),
         borderColor: '#16a34a',
         backgroundColor: 'rgba(22,163,74,0.15)',
         fill: true,
