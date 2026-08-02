@@ -1,7 +1,8 @@
 import { db } from '@/db/db'
-import { aliveChickens } from '@/domain/metrics'
+import { aliveChickens, feedStockDays, layingDrop, slowPayers } from '@/domain/metrics'
+import { useMetrics } from '@/composables/useMetrics'
 import { useFarmStore } from '@/stores/farm'
-import { daysSince, fmtMoney, startOfFarmDay } from '@/utils/format'
+import { daysSince, fmtMoney, fmtNumber, startOfFarmDay } from '@/utils/format'
 
 export type AlertSeverity = 'high' | 'med' | 'low'
 
@@ -24,12 +25,14 @@ export interface Alert {
  */
 export function useAlerts() {
   const farm = useFarmStore()
+  const metrics = useMetrics()
 
   async function compute(): Promise<Alert[]> {
     if (!farm.farmId) return []
 
     const alerts: Alert[] = []
     const penId = farm.activePenId
+    const data = await metrics.load()
 
     const [movements, sales, vaccines, failedSync] = await Promise.all([
       db.chickenMovements.where('farmId').equals(farm.farmId).toArray(),
@@ -72,6 +75,46 @@ export function useAlerts() {
       })
     }
 
+    // ----- Alimento por acabarse -----
+    // Quedarse sin alimento un domingo tumba la postura una semana entera. El
+    // dato es de TODA la granja: el alimento no se compra por galpón.
+    const stock = feedStockDays(data)
+
+    if (stock.days !== null && stock.days <= 7) {
+      const scope = farm.activePens.length > 1 ? ' (toda la granja)' : ''
+      const unsure =
+        stock.excludedTypes.length > 0
+          ? ` No se pudo contar: ${stock.excludedTypes.join(', ')}.`
+          : ''
+
+      alerts.push({
+        id: 'feed-low',
+        severity: stock.days <= 3 ? 'high' : 'med',
+        icon: 'chicken',
+        title: 'Alimento por acabarse',
+        detail: `Queda alimento para ${stock.days} día(s)${scope}. Consumo: ${fmtNumber(stock.dailyKg, 1)} kg/día.${unsure}`,
+        to: '/feed/purchase',
+      })
+    }
+
+    // ----- Caída de postura -----
+    // Es la señal temprana de enfermedad, calor o parásitos: los huevos bajan
+    // antes de que se note nada más.
+    const drop = layingDrop(data)
+
+    if (drop?.dropping) {
+      const last = drop.recent[drop.recent.length - 1]
+
+      alerts.push({
+        id: 'laying-drop',
+        severity: 'high',
+        icon: 'egg',
+        title: 'La postura viene cayendo',
+        detail: `Tres días seguidos por debajo de lo normal: ${fmtNumber(last * 100, 0)} % frente a ${fmtNumber(drop.reference * 100, 0)} % habitual. Revisa agua, alimento y calor.`,
+        to: '/reports',
+      })
+    }
+
     // ----- Deudas viejas -----
     const oldDebts = sales
       .filter((s) => s.status !== 'void' && s.balance > 0)
@@ -89,6 +132,24 @@ export function useAlerts() {
         icon: 'people',
         title: 'Deudas atrasadas',
         detail: `${clients} cliente(s) deben hace ${worst.days}+ días. Total: ${fmtMoney(total)}.`,
+        to: '/customers/debts',
+      })
+    }
+
+    // ----- Clientes con retraso recurrente -----
+    // Distinto de "deudas viejas": aquí no importa una venta atrasada suelta,
+    // sino el cliente que se atrasa una y otra vez.
+    const slow = slowPayers(sales)
+
+    if (slow.length > 0) {
+      const total = slow.reduce((sum, payer) => sum + payer.total, 0)
+
+      alerts.push({
+        id: 'slow-payers',
+        severity: 'med',
+        icon: 'people',
+        title: 'Clientes que se atrasan seguido',
+        detail: `${slow.length} cliente(s) tienen 2 o más ventas vencidas. Total: ${fmtMoney(total)}.`,
         to: '/customers/debts',
       })
     }
