@@ -15,7 +15,9 @@ import {
   overdueVaccine,
 } from '@/stores/sync'
 import { useAlerts, type Alert } from '@/composables/useAlerts'
-import { fmtMoney, fmtNumber, startOfFarmDay } from '@/utils/format'
+import { useMetrics } from '@/composables/useMetrics'
+import { eggsLaid, incomeOverFeedCost, type IncomeOverFeed } from '@/domain/metrics'
+import { addDays, dayKey, endOfFarmDay, fmtMoney, fmtNumber, startOfFarmDay } from '@/utils/format'
 import type { Vaccine } from '@/types/domain'
 
 const router = useRouter()
@@ -29,6 +31,11 @@ const debt = ref<number>(0)
 const vaccine = ref<Vaccine | undefined>(undefined)
 const overdue = ref<Vaccine | undefined>(undefined)
 const activeAlerts = ref<Alert[]>([])
+
+const metrics = useMetrics()
+const margin = ref<IncomeOverFeed | null>(null)
+/** Variación de los huevos de hoy contra el promedio de los 7 días anteriores. */
+const eggsTrend = ref<number | null>(null)
 
 /**
  * Etiqueta de la próxima vacuna.
@@ -67,6 +74,57 @@ async function refresh() {
       overdueVaccine(farm.farmId, farm.activePenId),
       alerts.compute(),
     ])
+
+  await refreshMetrics()
+}
+
+/**
+ * Margen del mes y tendencia de producción.
+ *
+ * Va aparte de `refresh` para no mezclar las consultas puntuales del resumen
+ * con la carga completa que necesita el motor de indicadores.
+ */
+async function refreshMetrics() {
+  const data = await metrics.load()
+  const today = new Date()
+
+  const monthStart = new Date(today)
+  monthStart.setDate(1)
+
+  margin.value = incomeOverFeedCost(data, {
+    from: startOfFarmDay(monthStart),
+    to: endOfFarmDay(today),
+  })
+
+  // Tendencia: hoy contra el promedio diario de los 7 días anteriores. Con
+  // menos de 3 días de historia no se muestra: un porcentaje calculado sobre
+  // uno o dos días no dice nada y sólo genera desconfianza.
+  const previous = {
+    from: startOfFarmDay(addDays(today, -7)),
+    to: endOfFarmDay(addDays(today, -1)),
+  }
+
+  const previousEggs = eggsLaid(data.collections, previous, farm.activePenId)
+
+  // `dayKey` y no `slice(0, 10)`: el ISO está en UTC y en Bogotá (UTC-5) una
+  // recolección de la tarde caería en el día siguiente, inflando el divisor.
+  const daysWithData = new Set(
+    data.collections
+      .filter((c) => {
+        const at = new Date(c.collectionAt).getTime()
+
+        return (
+          at >= previous.from.getTime() &&
+          at <= previous.to.getTime() &&
+          (!farm.activePenId || c.penId === farm.activePenId)
+        )
+      })
+      .map((c) => dayKey(c.collectionAt)),
+  ).size
+
+  const average = daysWithData >= 3 ? previousEggs / daysWithData : 0
+
+  eggsTrend.value = average > 0 ? (eggsToday.value - average) / average : null
 }
 
 // `setupListeners()` ya se llama una vez en main.ts y es idempotente. Antes se
@@ -120,6 +178,14 @@ const menu = computed(() => [
           <span v-else-if="farm.activePens.length > 1" class="ml-1 text-xs text-slate-400">· Todos</span>
         </p>
         <p class="num-big">{{ eggsToday }}</p>
+        <p
+          v-if="eggsTrend !== null"
+          class="text-xs font-semibold"
+          :class="eggsTrend >= 0 ? 'text-grass-600' : 'text-alert-600'"
+        >
+          {{ eggsTrend >= 0 ? '▲' : '▼' }} {{ fmtNumber(Math.abs(eggsTrend) * 100, 0) }} % vs.
+          promedio
+        </p>
       </div>
       <div class="card">
         <p class="text-sm font-semibold text-slate-500">
@@ -144,6 +210,22 @@ const menu = computed(() => [
         <p class="text-sm font-semibold text-slate-500">Por cobrar</p>
         <p class="text-2xl font-bold" :class="debt > 0 ? 'text-alert-600' : 'text-slate-800'">
           {{ fmtMoney(debt) }}
+        </p>
+      </div>
+
+      <!-- Ingreso menos alimento: NO es utilidad neta. La app no captura droga,
+           luz ni mano de obra, y llamarlo utilidad sería mentir. -->
+      <div class="card col-span-2">
+        <p class="text-sm font-semibold text-slate-500">Ingreso menos alimento (mes)</p>
+        <p
+          class="num-big"
+          :class="(margin?.iofc ?? 0) >= 0 ? 'text-grass-600' : 'text-alert-600'"
+        >
+          {{ margin === null ? '—' : fmtMoney(margin.iofc) }}
+        </p>
+        <p class="text-xs text-slate-400">
+          Ventas {{ margin === null ? '—' : fmtMoney(margin.sales) }} · Alimento
+          {{ margin === null ? '—' : fmtMoney(margin.feedCost) }}
         </p>
       </div>
     </section>
