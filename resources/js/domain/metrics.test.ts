@@ -17,6 +17,7 @@ import {
   kgFactor,
   layingDrop,
   layingRate,
+  slowPayers,
   type MetricsInput,
 } from './metrics'
 import { dayKey, setRegionalConfig } from '@/utils/format'
@@ -638,5 +639,48 @@ describe('layingDrop', () => {
 
   it('devuelve null sin historia suficiente', () => {
     expect(layingDrop(input({ movements }), today)).toBeNull()
+  })
+})
+
+describe('slowPayers', () => {
+  const today = new Date('2026-07-31T12:00:00.000Z')
+
+  /** Venta con saldo, hecha hace `days` días. */
+  function debt(id: string, customerId: string, days: number, balance: number): Sale {
+    return sale({
+      localUuid: id,
+      customerId,
+      soldAt: new Date(today.getTime() - days * 86_400_000).toISOString(),
+      total: balance,
+      balance,
+      status: 'pending',
+    })
+  }
+
+  it('marca al cliente con dos o más ventas vencidas', () => {
+    const sales = [debt('s-1', 'cus-1', 20, 50_000), debt('s-2', 'cus-1', 30, 30_000)]
+
+    const result = slowPayers(sales, today)
+
+    expect(result).toHaveLength(1)
+    expect(result[0].customerId).toBe('cus-1')
+    expect(result[0].overdueSales).toBe(2)
+    expect(result[0].total).toBe(80_000)
+    expect(result[0].oldestDays).toBe(30)
+  })
+
+  it('no marca al cliente con una sola venta vencida', () => {
+    expect(slowPayers([debt('s-1', 'cus-1', 20, 50_000)], today)).toEqual([])
+  })
+
+  it('no cuenta las ventas recientes ni las anuladas ni las pagadas', () => {
+    const sales = [
+      debt('s-1', 'cus-1', 20, 50_000),
+      debt('s-2', 'cus-1', 3, 30_000), // reciente
+      { ...debt('s-3', 'cus-1', 40, 20_000), status: 'void' as const },
+      { ...debt('s-4', 'cus-1', 40, 0), balance: 0 },
+    ]
+
+    expect(slowPayers(sales, today)).toEqual([])
   })
 })

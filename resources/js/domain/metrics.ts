@@ -466,3 +466,53 @@ export function layingDrop(input: MetricsInput, today: Date = new Date()): Layin
     recent: rates,
   }
 }
+
+export interface SlowPayer {
+  customerId: string
+  overdueSales: number
+  total: number
+  oldestDays: number
+}
+
+const OVERDUE_DAYS = 14
+const OVERDUE_SALES = 2
+
+/**
+ * Clientes con retraso recurrente.
+ *
+ * Se calcula sólo con las ventas, sin cruzar pagos: un `payment` puede no estar
+ * atado a una venta (abono al saldo global del cliente, `saleId` opcional), así
+ * que "cuántos días tardó en pagar" no es calculable de forma fiable. "Tiene dos
+ * o más ventas vencidas" sí lo es.
+ */
+export function slowPayers(sales: Sale[], today: Date = new Date()): SlowPayer[] {
+  const byCustomer = new Map<string, { total: number; count: number; oldestDays: number }>()
+
+  for (const sale of sales) {
+    if (sale.status === 'void' || sale.balance <= 0 || !sale.customerId) continue
+
+    const soldAt = new Date(sale.soldAt).getTime()
+    if (Number.isNaN(soldAt)) continue
+
+    const days = Math.floor((today.getTime() - soldAt) / 86_400_000)
+    if (days < OVERDUE_DAYS) continue
+
+    const entry = byCustomer.get(sale.customerId) ?? { total: 0, count: 0, oldestDays: 0 }
+
+    entry.total += sale.balance
+    entry.count += 1
+    entry.oldestDays = Math.max(entry.oldestDays, days)
+
+    byCustomer.set(sale.customerId, entry)
+  }
+
+  return [...byCustomer.entries()]
+    .filter(([, entry]) => entry.count >= OVERDUE_SALES)
+    .map(([customerId, entry]) => ({
+      customerId,
+      overdueSales: entry.count,
+      total: entry.total,
+      oldestDays: entry.oldestDays,
+    }))
+    .sort((a, b) => b.total - a.total)
+}
