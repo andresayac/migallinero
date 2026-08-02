@@ -8,7 +8,7 @@ import type {
   Payment,
   Sale,
 } from '@/types/domain'
-import { addDays, dayKey, endOfFarmDay, startOfFarmDay } from '@/utils/format'
+import { addDays, dayKey, endOfFarmDay, startOfFarmDay, toMoney } from '@/utils/format'
 
 /**
  * Indicadores de producción avícola.
@@ -288,4 +288,43 @@ export function feedCostPerEgg(input: MetricsInput, window: MetricsWindow): numb
   if (eggs <= 0) return null
 
   return feedCost(input, window) / eggs
+}
+
+export interface IncomeOverFeed {
+  /** Ventas del periodo, sin las anuladas. */
+  sales: number
+  /** Pagos recibidos en el periodo, sin los anulados. Plata en mano. */
+  collected: number
+  feedCost: number
+  /** Ventas menos costo del alimento consumido. */
+  iofc: number
+}
+
+/**
+ * Ingreso menos costo de alimento.
+ *
+ * Es el indicador estándar en producción comercial de huevo, porque el alimento
+ * es el 65-75 % del costo. NO es utilidad neta: la app no captura droga, luz ni
+ * mano de obra, y llamarlo utilidad sería falso.
+ *
+ * Las ventas no se filtran por galpón: una venta no pertenece a ninguno. El
+ * costo del alimento sí respeta `penId`.
+ */
+export function incomeOverFeedCost(input: MetricsInput, window: MetricsWindow): IncomeOverFeed {
+  const sales = inWindow(input.sales, window, (s) => s.soldAt)
+    .filter((s) => s.status !== 'void')
+    .reduce((total, s) => total + s.total, 0)
+
+  const collected = inWindow(input.payments, window, (p) => p.paidAt)
+    .filter((p) => !p.voidedAt)
+    .reduce((total, p) => total + p.amount, 0)
+
+  const cost = feedCost(input, window)
+
+  return {
+    sales: toMoney(sales),
+    collected: toMoney(collected),
+    feedCost: toMoney(cost),
+    iofc: toMoney(sales - cost),
+  }
 }

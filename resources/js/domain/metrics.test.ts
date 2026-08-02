@@ -9,6 +9,7 @@ import {
   feedConversion,
   feedCostPerEgg,
   henDays,
+  incomeOverFeedCost,
   inWindow,
   kgFactor,
   layingRate,
@@ -21,6 +22,8 @@ import type {
   FeedPurchase,
   FeedRecord,
   FeedType,
+  Payment,
+  Sale,
 } from '@/types/domain'
 
 // Los cálculos por día dependen de la zona horaria de la granja: en Bogotá
@@ -404,5 +407,78 @@ describe('feedConversion y feedCostPerEgg', () => {
 
     expect(feedConversion(input({ feedRecords: records }), window)).toBeNull()
     expect(feedCostPerEgg(input({ feedRecords: records }), window)).toBeNull()
+  })
+})
+
+function sale(patch: Partial<Sale>): Sale {
+  return {
+    localUuid: 's-1',
+    farmId: 'f-1',
+    pendingSync: false,
+    createdAt: '2026-07-01T12:00:00.000Z',
+    updatedAt: '2026-07-01T12:00:00.000Z',
+    createdBy: 'u-1',
+    type: 'sale',
+    customerId: 'cus-1',
+    soldAt: '2026-07-01T12:00:00.000Z',
+    total: 0,
+    discount: 0,
+    paid: 0,
+    balance: 0,
+    status: 'paid',
+    lines: [],
+    ...patch,
+  } as Sale
+}
+
+function payment(patch: Partial<Payment>): Payment {
+  return {
+    localUuid: 'p-1',
+    farmId: 'f-1',
+    pendingSync: false,
+    createdAt: '2026-07-01T12:00:00.000Z',
+    updatedAt: '2026-07-01T12:00:00.000Z',
+    createdBy: 'u-1',
+    customerId: 'cus-1',
+    amount: 0,
+    paidAt: '2026-07-01T12:00:00.000Z',
+    ...patch,
+  } as Payment
+}
+
+describe('incomeOverFeedCost', () => {
+  const window = {
+    from: new Date('2026-07-01T12:00:00.000Z'),
+    to: new Date('2026-07-31T12:00:00.000Z'),
+  }
+
+  it('resta el costo del alimento a las ventas del periodo', () => {
+    const sales = [sale({ total: 500_000 })]
+    const records = [feedRecord({ totalCost: 180_000 })]
+
+    const result = incomeOverFeedCost(input({ sales, feedRecords: records }), window)
+
+    expect(result.sales).toBe(500_000)
+    expect(result.feedCost).toBe(180_000)
+    expect(result.iofc).toBe(320_000)
+  })
+
+  it('excluye las ventas anuladas', () => {
+    const sales = [
+      sale({ total: 500_000 }),
+      sale({ localUuid: 's-2', total: 900_000, status: 'void' }),
+    ]
+
+    expect(incomeOverFeedCost(input({ sales }), window).sales).toBe(500_000)
+  })
+
+  it('reporta lo cobrado aparte y descarta los pagos anulados', () => {
+    // Anular una venta anula sus pagos: si contaran, la plata "en mano" mentiría.
+    const payments = [
+      payment({ amount: 100_000 }),
+      payment({ localUuid: 'p-2', amount: 70_000, voidedAt: '2026-07-05T12:00:00.000Z' }),
+    ]
+
+    expect(incomeOverFeedCost(input({ payments }), window).collected).toBe(100_000)
   })
 })
