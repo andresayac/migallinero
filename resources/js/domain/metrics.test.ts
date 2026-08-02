@@ -3,6 +3,7 @@ import {
   ALL_TIME,
   aliveChickens,
   aliveChickensAt,
+  dailyLayingRate,
   dayKeysBetween,
   eggsLaid,
   farmDays,
@@ -14,6 +15,7 @@ import {
   incomeOverFeedCost,
   inWindow,
   kgFactor,
+  layingDrop,
   layingRate,
   type MetricsInput,
 } from './metrics'
@@ -553,5 +555,88 @@ describe('feedStockDays', () => {
     })
 
     expect(feedStockDays(scoped, today).dailyKg).toBeCloseTo(7, 5)
+  })
+})
+
+describe('dailyLayingRate', () => {
+  it('devuelve un punto por día con su postura', () => {
+    const movements = [movement({ type: 'buy', qty: 100, movementAt: '2026-06-01T10:00:00.000Z' })]
+    const collections = [
+      collection({ collectionAt: '2026-07-01T14:00:00.000Z', total: 90 }),
+      collection({ localUuid: 'c-2', collectionAt: '2026-07-02T14:00:00.000Z', total: 80 }),
+    ]
+
+    const series = dailyLayingRate(input({ movements, collections }), {
+      from: new Date('2026-07-01T12:00:00.000Z'),
+      to: new Date('2026-07-02T12:00:00.000Z'),
+    })
+
+    expect(series).toHaveLength(2)
+    expect(series[0].day).toBe('2026-07-01')
+    expect(series[0].rate).toBeCloseTo(0.9, 5)
+    expect(series[1].rate).toBeCloseTo(0.8, 5)
+  })
+
+  it('marca el día como null si no había aves', () => {
+    const series = dailyLayingRate(input(), {
+      from: new Date('2026-07-01T12:00:00.000Z'),
+      to: new Date('2026-07-01T12:00:00.000Z'),
+    })
+
+    expect(series[0].rate).toBeNull()
+  })
+})
+
+describe('layingDrop', () => {
+  const today = new Date('2026-07-25T12:00:00.000Z')
+  const movements = [movement({ type: 'buy', qty: 100, movementAt: '2026-06-01T10:00:00.000Z' })]
+
+  /** Recolecciones diarias de `total` huevos entre los días -from y -to. */
+  function daily(fromOffset: number, toOffset: number, total: number) {
+    const rows = []
+
+    for (let offset = fromOffset; offset >= toOffset; offset--) {
+      rows.push(
+        collection({
+          localUuid: `c-${offset}`,
+          collectionAt: new Date(today.getTime() - offset * 86_400_000).toISOString(),
+          total,
+        }),
+      )
+    }
+
+    return rows
+  }
+
+  it('detecta tres días seguidos por debajo del 90 % de la referencia', () => {
+    const collections = [
+      ...daily(17, 4, 90), // referencia: 90 %
+      ...daily(3, 1, 70), // últimos tres días: 70 % < 81 %
+    ]
+
+    const result = layingDrop(input({ movements, collections }), today)
+
+    expect(result?.dropping).toBe(true)
+    expect(result?.reference).toBeCloseTo(0.9, 5)
+  })
+
+  it('no dispara si sólo uno de los tres días bajó', () => {
+    const collections = [...daily(17, 4, 90), ...daily(3, 3, 70), ...daily(2, 1, 89)]
+
+    expect(layingDrop(input({ movements, collections }), today)?.dropping).toBe(false)
+  })
+
+  it('la referencia no se solapa con los días evaluados', () => {
+    // Si la referencia incluyera los días de la caída, se arrastraría hacia
+    // abajo y la alerta se taparía sola justo cuando más importa.
+    const collections = [...daily(17, 4, 90), ...daily(3, 1, 10)]
+    const result = layingDrop(input({ movements, collections }), today)
+
+    expect(result?.reference).toBeCloseTo(0.9, 5)
+    expect(result?.dropping).toBe(true)
+  })
+
+  it('devuelve null sin historia suficiente', () => {
+    expect(layingDrop(input({ movements }), today)).toBeNull()
   })
 })

@@ -389,3 +389,80 @@ export function feedStockDays(input: MetricsInput, today: Date = new Date()): Fe
     excludedTypes,
   }
 }
+
+export interface DailyRate {
+  /** Clave YYYY-MM-DD en la zona de la granja. */
+  day: string
+  eggs: number
+  hens: number
+  /** Fracción 0-1, o `null` si ese día no había aves. */
+  rate: number | null
+}
+
+/** Serie diaria de postura, para la gráfica y para detectar caídas. */
+export function dailyLayingRate(input: MetricsInput, window: MetricsWindow): DailyRate[] {
+  return farmDays(window).map((day) => {
+    const eggs = eggsLaid(input.collections, { from: day.start, to: day.end }, input.penId)
+    const hens = aliveChickensAt(input.movements, day.end, input.penId)
+
+    return { day: day.key, eggs, hens, rate: hens > 0 ? eggs / hens : null }
+  })
+}
+
+export interface LayingDrop {
+  dropping: boolean
+  /** Postura media de referencia, fracción 0-1. */
+  reference: number
+  /** Postura de los tres días evaluados, del más antiguo al más reciente. */
+  recent: number[]
+}
+
+/** Días de referencia y días evaluados. No se solapan, a propósito. */
+const DROP_REFERENCE_FROM = 17
+const DROP_REFERENCE_TO = 4
+const DROP_RECENT_DAYS = 3
+const DROP_THRESHOLD = 0.9
+
+/**
+ * Caída de postura sostenida.
+ *
+ * Compara los tres últimos días cerrados contra el promedio de los 14 días
+ * anteriores. Los dos tramos NO se solapan: si la referencia incluyera los días
+ * de la caída, se arrastraría hacia abajo y la alerta se taparía sola justo
+ * cuando más importa.
+ *
+ * El día de hoy queda fuera porque está incompleto: todavía se están recogiendo
+ * huevos y su postura parecería baja siempre.
+ *
+ * Umbral fijo del 90 % en vez de desviaciones estándar: el avicultor tiene que
+ * poder entender por qué le saltó el aviso.
+ */
+export function layingDrop(input: MetricsInput, today: Date = new Date()): LayingDrop | null {
+  const reference = dailyLayingRate(input, {
+    from: startOfFarmDay(addDays(today, -DROP_REFERENCE_FROM)),
+    to: endOfFarmDay(addDays(today, -DROP_REFERENCE_TO)),
+  }).filter((day) => day.rate !== null)
+
+  if (reference.length === 0) return null
+
+  const average = reference.reduce((sum, day) => sum + (day.rate ?? 0), 0) / reference.length
+
+  // Una referencia de cero no sirve para comparar: significa que hay gallinas
+  // pero nadie ha registrado recolecciones, no que la postura se haya caído.
+  if (average <= 0) return null
+
+  const recent = dailyLayingRate(input, {
+    from: startOfFarmDay(addDays(today, -DROP_RECENT_DAYS)),
+    to: endOfFarmDay(addDays(today, -1)),
+  })
+
+  if (recent.length < DROP_RECENT_DAYS || recent.some((day) => day.rate === null)) return null
+
+  const rates = recent.map((day) => day.rate as number)
+
+  return {
+    dropping: rates.every((rate) => rate < average * DROP_THRESHOLD),
+    reference: average,
+    recent: rates,
+  }
+}
