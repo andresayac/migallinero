@@ -164,9 +164,6 @@ const menu = computed(() => [
     <!-- Selector de galpón (multi-galpón) -->
     <PenSelector v-if="farm.activePens.length > 1" class="mb-4" />
 
-    <!-- Alertas operativas automáticas -->
-    <AlertBanner :alerts="activeAlerts" />
-
     <!-- Resumen del día con NÚMEROS GRANDES -->
     <section class="mb-6 grid grid-cols-2 gap-3">
       <div class="card">
@@ -241,6 +238,16 @@ const menu = computed(() => [
         size="tile"
         @click="router.push(item.to)"
       />
+    </section>
+
+    <!-- Alertas operativas, DEBAJO de los botones: el inicio se abre para
+         registrar algo, y una pila de avisos arriba empujaba las acciones
+         fuera de la pantalla. Aquí no estorban y siguen estando a la vista. -->
+    <section v-if="activeAlerts.length" class="mt-6">
+      <h2 class="mb-3 text-sm font-bold uppercase tracking-wide text-slate-400">
+        Avisos ({{ activeAlerts.length }})
+      </h2>
+      <AlertBanner :alerts="activeAlerts" />
     </section>
 
     <p v-if="farm.farmName" class="mt-6 text-center text-sm text-slate-400">

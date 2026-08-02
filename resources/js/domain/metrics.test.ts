@@ -362,6 +362,20 @@ describe('kgFactor', () => {
     // Adivinar en silencio falsearía el stock. Mejor declararlo desconocido.
     expect(kgFactor('ft-1', [feedType({ localUuid: 'ft-1', unit: 'bulto' })], [])).toBeNull()
   })
+
+  it('devuelve null si el tipo no está en el catálogo, aunque haya compras', () => {
+    // Un registro puede apuntar a un tipo que ya no está en el catálogo de esta
+    // granja. Sin unidad no hay conversión: antes caía en la rama de los bultos
+    // y multiplicaba por el kgPerBag de una compra ajena, así que 24 kg de
+    // consumo se reportaban como 960 kg/día y la alerta lo daba por cierto.
+    const purchases = [
+      feedPurchase({
+        lines: [{ feedTypeId: 'ft-otro', bags: 1, kgPerBag: 40, unitCost: 0, subtotal: 0 }],
+      }),
+    ]
+
+    expect(kgFactor('ft-otro', [], purchases)).toBeNull()
+  })
 })
 
 describe('feedConsumedKg', () => {

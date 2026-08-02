@@ -218,7 +218,15 @@ export function kgFactor(
   feedTypes: FeedType[],
   purchases: FeedPurchase[],
 ): number | null {
-  const unit = (feedTypes.find((t) => t.localUuid === feedTypeId)?.unit ?? '').trim().toLowerCase()
+  const type = feedTypes.find((t) => t.localUuid === feedTypeId)
+
+  // Tipo desconocido: no está en el catálogo de esta granja. Sin unidad no hay
+  // conversión posible. Antes caía en la rama de los bultos y multiplicaba por
+  // el kgPerBag de una compra cualquiera: 24 kg de consumo se reportaban como
+  // 960 kg/día, y la alerta lo afirmaba como un hecho.
+  if (!type) return null
+
+  const unit = (type.unit ?? '').trim().toLowerCase()
 
   if (unit === 'kg') return 1
 
