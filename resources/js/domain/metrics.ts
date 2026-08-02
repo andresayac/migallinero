@@ -195,3 +195,97 @@ export function layingRate(input: MetricsInput, window: MetricsWindow): number |
 
   return eggsLaid(input.collections, window, input.penId) / days
 }
+
+/**
+ * Factor para pasar la unidad de un tipo de alimento a kilogramos.
+ *
+ * Las compras siempre dan kg (`bags × kgPerBag`), pero el consumo se registra
+ * en la unidad del tipo, que es texto libre. Si esa unidad no es kg, se usa el
+ * `kgPerBag` más reciente registrado para ese tipo.
+ *
+ * Devuelve `null` cuando no hay forma de saberlo: el tipo no se mide en kg y
+ * nunca se ha comprado. Adivinar en silencio falsearía el stock.
+ */
+export function kgFactor(
+  feedTypeId: string,
+  feedTypes: FeedType[],
+  purchases: FeedPurchase[],
+): number | null {
+  const unit = (feedTypes.find((t) => t.localUuid === feedTypeId)?.unit ?? '').trim().toLowerCase()
+
+  if (unit === 'kg') return 1
+
+  const candidates = purchases
+    .flatMap((purchase) =>
+      (purchase.lines ?? [])
+        .filter((line) => line.feedTypeId === feedTypeId && line.kgPerBag > 0)
+        .map((line) => ({ kgPerBag: line.kgPerBag, at: new Date(purchase.purchasedAt).getTime() })),
+    )
+    .sort((a, b) => b.at - a.at)
+
+  return candidates[0]?.kgPerBag ?? null
+}
+
+export interface FeedKg {
+  kg: number
+  /** Nombres de los tipos que no se pudieron convertir; la interfaz los declara. */
+  excludedTypes: string[]
+}
+
+/** Alimento consumido en la ventana, convertido a kg. */
+export function feedConsumedKg(input: MetricsInput, window: MetricsWindow): FeedKg {
+  const records = inWindow(input.feedRecords, window, (r) => r.recordedAt).filter(
+    (r) => !input.penId || r.penId === input.penId,
+  )
+
+  const excluded = new Set<string>()
+  let kg = 0
+
+  for (const record of records) {
+    for (const line of record.lines ?? []) {
+      const factor = kgFactor(line.feedTypeId, input.feedTypes, input.feedPurchases)
+
+      if (factor === null) {
+        const name =
+          line.feedTypeName ??
+          input.feedTypes.find((t) => t.localUuid === line.feedTypeId)?.name ??
+          'Sin nombre'
+
+        excluded.add(name)
+        continue
+      }
+
+      kg += line.qty * factor
+    }
+  }
+
+  return { kg, excludedTypes: [...excluded] }
+}
+
+/** Costo del alimento consumido en la ventana. Ya viene desnormalizado. */
+export function feedCost(input: MetricsInput, window: MetricsWindow): number {
+  return inWindow(input.feedRecords, window, (r) => r.recordedAt)
+    .filter((r) => !input.penId || r.penId === input.penId)
+    .reduce((total, record) => total + record.totalCost, 0)
+}
+
+/**
+ * Conversión alimentaria: kg de alimento por docena producida.
+ * Referencia de la industria: 2.0 a 2.3 kg por docena.
+ */
+export function feedConversion(input: MetricsInput, window: MetricsWindow): number | null {
+  const eggs = eggsLaid(input.collections, window, input.penId)
+
+  if (eggs <= 0) return null
+
+  return feedConsumedKg(input, window).kg / (eggs / 12)
+}
+
+/** Costo de alimento por huevo. Marca el precio bajo el cual no se puede vender. */
+export function feedCostPerEgg(input: MetricsInput, window: MetricsWindow): number | null {
+  const eggs = eggsLaid(input.collections, window, input.penId)
+
+  if (eggs <= 0) return null
+
+  return feedCost(input, window) / eggs
+}

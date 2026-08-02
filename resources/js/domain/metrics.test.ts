@@ -5,13 +5,23 @@ import {
   dayKeysBetween,
   eggsLaid,
   farmDays,
+  feedConsumedKg,
+  feedConversion,
+  feedCostPerEgg,
   henDays,
   inWindow,
+  kgFactor,
   layingRate,
   type MetricsInput,
 } from './metrics'
 import { dayKey, setRegionalConfig } from '@/utils/format'
-import type { ChickenMovement, EggCollection } from '@/types/domain'
+import type {
+  ChickenMovement,
+  EggCollection,
+  FeedPurchase,
+  FeedRecord,
+  FeedType,
+} from '@/types/domain'
 
 // Los cálculos por día dependen de la zona horaria de la granja: en Bogotá
 // (UTC-5) una recolección de las 19:00 locales es del día siguiente en UTC.
@@ -253,5 +263,146 @@ describe('layingRate', () => {
 
     expect(eggsLaid(collections, window, 'pen-a')).toBe(50)
     expect(eggsLaid(collections, window)).toBe(80)
+  })
+})
+
+function feedType(patch: Partial<FeedType>): FeedType {
+  return {
+    localUuid: 'ft-1',
+    farmId: 'f-1',
+    pendingSync: false,
+    createdAt: '2026-07-01T12:00:00.000Z',
+    updatedAt: '2026-07-01T12:00:00.000Z',
+    createdBy: 'u-1',
+    name: 'Concentrado de postura',
+    unit: 'kg',
+    active: true,
+    sort: 1,
+    ...patch,
+  } as FeedType
+}
+
+function feedRecord(patch: Partial<FeedRecord>): FeedRecord {
+  return {
+    localUuid: 'fr-1',
+    farmId: 'f-1',
+    pendingSync: false,
+    createdAt: '2026-07-01T12:00:00.000Z',
+    updatedAt: '2026-07-01T12:00:00.000Z',
+    createdBy: 'u-1',
+    type: 'feed-record',
+    penId: 'pen-a',
+    recordedAt: '2026-07-01T12:00:00.000Z',
+    shift: 'morning',
+    totalQty: 0,
+    totalCost: 0,
+    lines: [],
+    ...patch,
+  } as FeedRecord
+}
+
+function feedPurchase(patch: Partial<FeedPurchase>): FeedPurchase {
+  return {
+    localUuid: 'fp-1',
+    farmId: 'f-1',
+    pendingSync: false,
+    createdAt: '2026-07-01T12:00:00.000Z',
+    updatedAt: '2026-07-01T12:00:00.000Z',
+    createdBy: 'u-1',
+    type: 'feed-purchase',
+    purchasedAt: '2026-07-01T12:00:00.000Z',
+    totalBags: 0,
+    totalQty: 0,
+    totalCost: 0,
+    lines: [],
+    ...patch,
+  } as FeedPurchase
+}
+
+describe('kgFactor', () => {
+  it('vale 1 cuando el tipo ya se mide en kg', () => {
+    expect(kgFactor('ft-1', [feedType({ localUuid: 'ft-1', unit: 'kg' })], [])).toBe(1)
+  })
+
+  it('usa el kgPerBag más reciente cuando el tipo se mide en bultos', () => {
+    const types = [feedType({ localUuid: 'ft-1', unit: 'bulto' })]
+    const purchases = [
+      feedPurchase({
+        purchasedAt: '2026-06-01T12:00:00.000Z',
+        lines: [{ feedTypeId: 'ft-1', bags: 1, kgPerBag: 40, unitCost: 0, subtotal: 0 }],
+      }),
+      feedPurchase({
+        purchasedAt: '2026-07-01T12:00:00.000Z',
+        lines: [{ feedTypeId: 'ft-1', bags: 1, kgPerBag: 40.5, unitCost: 0, subtotal: 0 }],
+      }),
+    ]
+
+    expect(kgFactor('ft-1', types, purchases)).toBe(40.5)
+  })
+
+  it('devuelve null si el tipo no está en kg y nunca se ha comprado', () => {
+    // Adivinar en silencio falsearía el stock. Mejor declararlo desconocido.
+    expect(kgFactor('ft-1', [feedType({ localUuid: 'ft-1', unit: 'bulto' })], [])).toBeNull()
+  })
+})
+
+describe('feedConsumedKg', () => {
+  const window = {
+    from: new Date('2026-07-01T12:00:00.000Z'),
+    to: new Date('2026-07-31T12:00:00.000Z'),
+  }
+
+  it('convierte a kg y declara los tipos que no pudo convertir', () => {
+    const types = [
+      feedType({ localUuid: 'ft-kg', unit: 'kg', name: 'Maíz' }),
+      feedType({ localUuid: 'ft-raro', unit: 'bulto', name: 'Purina' }),
+    ]
+    const records = [
+      feedRecord({
+        lines: [
+          { feedTypeId: 'ft-kg', qty: 30, unitCost: 0, subtotal: 0 },
+          { feedTypeId: 'ft-raro', qty: 2, unitCost: 0, subtotal: 0 },
+        ],
+      }),
+    ]
+
+    const result = feedConsumedKg(input({ feedRecords: records, feedTypes: types }), window)
+
+    expect(result.kg).toBe(30)
+    expect(result.excludedTypes).toEqual(['Purina'])
+  })
+})
+
+describe('feedConversion y feedCostPerEgg', () => {
+  const window = {
+    from: new Date('2026-07-01T12:00:00.000Z'),
+    to: new Date('2026-07-31T12:00:00.000Z'),
+  }
+
+  it('calcula kg de alimento por docena', () => {
+    // 24 kg de alimento y 120 huevos = 10 docenas → 2.4 kg/docena.
+    const types = [feedType({ localUuid: 'ft-kg', unit: 'kg' })]
+    const records = [
+      feedRecord({ lines: [{ feedTypeId: 'ft-kg', qty: 24, unitCost: 0, subtotal: 0 }] }),
+    ]
+    const collections = [collection({ collectionAt: '2026-07-05T12:00:00.000Z', total: 120 })]
+
+    const data = input({ feedRecords: records, feedTypes: types, collections })
+
+    expect(feedConversion(data, window)).toBeCloseTo(2.4, 5)
+  })
+
+  it('calcula el costo de alimento por huevo', () => {
+    const records = [feedRecord({ totalCost: 60_000 })]
+    const collections = [collection({ collectionAt: '2026-07-05T12:00:00.000Z', total: 300 })]
+
+    expect(feedCostPerEgg(input({ feedRecords: records, collections }), window)).toBe(200)
+  })
+
+  it('devuelven null sin huevos, en vez de dividir por cero', () => {
+    const records = [feedRecord({ totalCost: 60_000 })]
+
+    expect(feedConversion(input({ feedRecords: records }), window)).toBeNull()
+    expect(feedCostPerEgg(input({ feedRecords: records }), window)).toBeNull()
   })
 })
