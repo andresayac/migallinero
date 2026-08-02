@@ -68,10 +68,17 @@ export interface MetricsWindow {
   to: Date
 }
 
-/** Todo el historial. Para stock acumulado, que no depende de una ventana. */
+/**
+ * Todo el historial. Para stock acumulado, que no depende de una ventana.
+ *
+ * El límite superior NO es el máximo representable por Date: `startOfFarmDay`
+ * reconstruye la fecha desde `dayKey`, y un año de cinco cifras necesita el
+ * prefijo `+` en ISO. Sin él la fecha sale inválida, el filtro descarta TODO y
+ * el consumo acumulado daba cero — el stock parecía intacto para siempre.
+ */
 export const ALL_TIME: MetricsWindow = {
   from: new Date(0),
-  to: new Date(8_640_000_000_000_000),
+  to: new Date('9999-12-31T00:00:00.000Z'),
 }
 
 /**
@@ -326,5 +333,59 @@ export function incomeOverFeedCost(input: MetricsInput, window: MetricsWindow): 
     collected: toMoney(collected),
     feedCost: toMoney(cost),
     iofc: toMoney(sales - cost),
+  }
+}
+
+export interface FeedStock {
+  /** Días que dura el stock al ritmo actual. `null` si no hay con qué proyectar. */
+  days: number | null
+  stockKg: number
+  dailyKg: number
+  excludedTypes: string[]
+}
+
+/** Días de consumo con los que se estima el ritmo diario. */
+const FEED_RATE_DAYS = 14
+
+/**
+ * Días de alimento restantes.
+ *
+ * SIEMPRE de toda la granja: se ignora `penId` a propósito. `feed_purchases` no
+ * tiene galpón —el alimento se compra para la granja— mientras que
+ * `feed_records` sí lo tiene. Filtrar el consumo por galpón contra unas compras
+ * sin filtrar daría un stock inflado. La interfaz debe etiquetarlo como dato de
+ * toda la granja cuando haya un galpón seleccionado.
+ */
+export function feedStockDays(input: MetricsInput, today: Date = new Date()): FeedStock {
+  const farmWide: MetricsInput = { ...input, penId: '' }
+
+  const purchasedKg = input.feedPurchases.reduce(
+    (total, purchase) =>
+      total + (purchase.lines ?? []).reduce((sum, line) => sum + line.bags * line.kgPerBag, 0),
+    0,
+  )
+
+  const consumed = feedConsumedKg(farmWide, ALL_TIME)
+  const stockKg = purchasedKg - consumed.kg
+
+  const recent = feedConsumedKg(farmWide, {
+    from: startOfFarmDay(addDays(today, -FEED_RATE_DAYS)),
+    to: endOfFarmDay(addDays(today, -1)),
+  })
+
+  const dailyKg = recent.kg / FEED_RATE_DAYS
+  const excludedTypes = [...new Set([...consumed.excludedTypes, ...recent.excludedTypes])]
+
+  if (dailyKg <= 0) {
+    return { days: null, stockKg, dailyKg: 0, excludedTypes }
+  }
+
+  return {
+    // Stock negativo significa que faltan compras por registrar. Avisar de que
+    // no queda alimento es más útil que mostrar un número negativo.
+    days: Math.max(0, Math.floor(stockKg / dailyKg)),
+    stockKg,
+    dailyKg,
+    excludedTypes,
   }
 }

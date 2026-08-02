@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ALL_TIME,
   aliveChickens,
   aliveChickensAt,
   dayKeysBetween,
@@ -8,6 +9,7 @@ import {
   feedConsumedKg,
   feedConversion,
   feedCostPerEgg,
+  feedStockDays,
   henDays,
   incomeOverFeedCost,
   inWindow,
@@ -163,6 +165,16 @@ describe('inWindow', () => {
     )
 
     expect(kept).toHaveLength(2)
+  })
+
+  it('ALL_TIME no descarta nada', () => {
+    // Con `new Date(8.64e15)` como tope, startOfFarmDay reconstruía un año de
+    // cinco cifras sin el prefijo `+` que exige ISO: la fecha salía inválida y
+    // el filtro descartaba TODO, así que el consumo acumulado daba cero y el
+    // stock de alimento parecía intacto para siempre.
+    const rows = [{ at: '1990-01-01T00:00:00.000Z' }, { at: '2026-07-01T00:00:00.000Z' }]
+
+    expect(inWindow(rows, ALL_TIME, (r) => r.at)).toHaveLength(2)
   })
 })
 
@@ -480,5 +492,66 @@ describe('incomeOverFeedCost', () => {
     ]
 
     expect(incomeOverFeedCost(input({ payments }), window).collected).toBe(100_000)
+  })
+})
+
+describe('feedStockDays', () => {
+  const today = new Date('2026-07-15T12:00:00.000Z')
+  const types = [feedType({ localUuid: 'ft-kg', unit: 'kg' })]
+
+  /** Consumo diario de `qty` kg durante los 14 días previos a hoy. */
+  function dailyConsumption(qty: number, penId = 'pen-a') {
+    return Array.from({ length: 14 }, (_, i) =>
+      feedRecord({
+        localUuid: `fr-${i}`,
+        penId,
+        recordedAt: new Date(today.getTime() - (i + 1) * 86_400_000).toISOString(),
+        lines: [{ feedTypeId: 'ft-kg', qty, unitCost: 0, subtotal: 0 }],
+      }),
+    )
+  }
+
+  const purchases = [
+    feedPurchase({
+      lines: [{ feedTypeId: 'ft-kg', bags: 5, kgPerBag: 40, unitCost: 0, subtotal: 0 }],
+    }),
+  ]
+
+  it('proyecta los días que quedan con el consumo de los últimos 14 días', () => {
+    // 5 bultos de 40 kg = 200 kg. Consumidos 7 kg/día × 14 días = 98 kg.
+    // Quedan 102 kg; 102 / 7 = 14.57 → 14 días.
+    const result = feedStockDays(
+      input({ feedPurchases: purchases, feedRecords: dailyConsumption(7), feedTypes: types }),
+      today,
+    )
+
+    expect(result.stockKg).toBeCloseTo(102, 5)
+    expect(result.dailyKg).toBeCloseTo(7, 5)
+    expect(result.days).toBe(14)
+  })
+
+  it('devuelve null cuando no hay consumo con el que proyectar', () => {
+    expect(
+      feedStockDays(input({ feedPurchases: purchases, feedTypes: types }), today).days,
+    ).toBeNull()
+  })
+
+  it('reporta 0 días cuando el stock sale negativo por compras sin registrar', () => {
+    expect(
+      feedStockDays(input({ feedRecords: dailyConsumption(10), feedTypes: types }), today).days,
+    ).toBe(0)
+  })
+
+  it('ignora el galpón activo: el alimento se compra para toda la granja', () => {
+    // feed_purchases no tiene penId. Filtrar el consumo por galpón contra unas
+    // compras sin filtrar daría un stock inflado.
+    const scoped = input({
+      feedPurchases: purchases,
+      feedRecords: dailyConsumption(7, 'pen-b'),
+      feedTypes: types,
+      penId: 'pen-a',
+    })
+
+    expect(feedStockDays(scoped, today).dailyKg).toBeCloseTo(7, 5)
   })
 })
