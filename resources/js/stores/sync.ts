@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { db } from '@/db/db'
 import { onQueueChanged, tableFor } from '@/db/repository'
 import { api, isNetworkError, type SyncPushItem } from '@/api/http'
+import { aliveChickens as aliveFrom } from '@/domain/metrics'
 import { nowISO, startOfFarmDay } from '@/utils/format'
 import type { OfflineRecord, SyncEntity, SyncQueueItem, Vaccine } from '@/types/domain'
 import { useFarmStore } from './farm'
@@ -621,26 +622,11 @@ export async function todayEggs(farmId: string, penId = ''): Promise<number> {
 }
 
 export async function aliveChickens(farmId: string, penId = ''): Promise<number> {
-  const mv = await db.chickenMovements
-    .where('farmId')
-    .equals(farmId)
-    .and((m) => !penId || m.penId === penId)
-    .toArray()
+  const mv = await db.chickenMovements.where('farmId').equals(farmId).toArray()
 
-  const sum = (type: string) =>
-    mv.filter((m) => m.type === type).reduce((s, m) => s + m.qty, 0)
-
-  // `adjust` puede ser negativo (la cantidad es un entero con signo) y se suma
-  // tal cual; `transfer` sólo mueve aves entre galpones de la misma granja, así
-  // que altera el total de un galpón pero no el de la granja.
-  let delta =
-    sum('buy') + sum('birth') + sum('adjust') - sum('death') - sum('sale') - sum('revoke')
-
-  if (penId) {
-    delta += sum('transfer')
-  }
-
-  return Math.max(0, delta)
+  // El filtro por galpón lo hace la función pura: necesita ver TODOS los
+  // movimientos de la granja para tratar bien las transferencias.
+  return aliveFrom(mv, penId)
 }
 
 /**

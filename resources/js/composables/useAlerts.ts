@@ -1,4 +1,5 @@
 import { db } from '@/db/db'
+import { aliveChickens } from '@/domain/metrics'
 import { useFarmStore } from '@/stores/farm'
 import { daysSince, fmtMoney, startOfFarmDay } from '@/utils/format'
 
@@ -45,20 +46,15 @@ export function useAlerts() {
     const inPen = <T extends { penId?: string }>(rows: T[]) =>
       rows.filter((r) => !penId || r.penId === penId)
 
-    const scopedMovements = inPen(movements)
-
-    const sum = (type: string) =>
-      scopedMovements.filter((m) => m.type === type).reduce((s, m) => s + m.qty, 0)
-
-    const alive = Math.max(
-      0,
-      sum('buy') + sum('birth') + sum('adjust') - sum('death') - sum('sale') - sum('revoke'),
-    )
+    // La fórmula vive en `domain/metrics`. Aquí había una copia que NO sumaba
+    // las transferencias, así que con un galpón activo el umbral de mortalidad
+    // se comparaba contra un plantel equivocado.
+    const alive = aliveChickens(movements, penId)
 
     // Por FECHA OPERATIVA: una muerte de ayer digitada hoy no es mortalidad de hoy.
     const startOfToday = startOfFarmDay()
 
-    const deathsToday = scopedMovements
+    const deathsToday = inPen(movements)
       .filter((m) => m.type === 'death' && new Date(m.movementAt ?? m.createdAt) >= startOfToday)
       .reduce((s, m) => s + m.qty, 0)
 
