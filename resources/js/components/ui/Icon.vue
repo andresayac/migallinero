@@ -68,6 +68,15 @@ withDefaults(
     <template v-else-if="name === 'back'">
       <path d="M19 12H5M12 19l-7-7 7-7" />
     </template>
+    <!-- Tarjetas: el resumen del día. A propósito distinto de 'report' (barras),
+         que es el análisis por periodo; si se parecieran, las dos pantallas se
+         confundirían. -->
+    <template v-else-if="name === 'summary'">
+      <rect x="3" y="3" width="8" height="8" rx="2" />
+      <rect x="13" y="3" width="8" height="8" rx="2" />
+      <rect x="3" y="13" width="8" height="8" rx="2" />
+      <rect x="13" y="13" width="8" height="8" rx="2" />
+    </template>
     <template v-else-if="name === 'close'">
       <path d="M18 6L6 18M6 6l12 12" />
     </template>

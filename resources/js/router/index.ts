@@ -22,6 +22,11 @@ const router = createRouter({
       component: () => import('@/views/HomeView.vue'),
     },
     {
+      path: '/summary',
+      name: 'summary',
+      component: () => import('@/views/SummaryView.vue'),
+    },
+    {
       path: '/eggs/new',
       name: 'eggs-new',
       component: () => import('@/views/eggs/EggCollectionEditView.vue'),
